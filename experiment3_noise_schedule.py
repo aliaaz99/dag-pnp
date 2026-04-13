@@ -31,14 +31,14 @@ from dag_config import (shared_kwargs, SPARSITY, WEIGHT_LOW, WEIGHT_HIGH,
 # ===========================================================================
 def get_denoiser():
     return IdentityDenoiser()  # <-- ablation: no denoising
-    # return GaussianShrinkageDenoiser(prior_std=0.75)  # <-- replace with real denoiser
+    # return GaussianShrinkageDenoiser(prior_std=1.5)  # <-- replace with real denoiser
 
 
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_CONV    = 20
-D_VALUES  = [10, 20, 50]
+D_CONV    = 50
+D_VALUES  = [10, 20, 30]
 N_SAMPLES = 500
 NUM_SEEDS = 10
 SEED_CONV = 42
@@ -98,7 +98,7 @@ def run_convergence(denoiser, save_dir):
     # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
     # W_true = scale_free_dag(D_CONV, m=SF_M, weight_low=WEIGHT_LOW,
     #                         weight_high=WEIGHT_HIGH, seed=SEED_CONV)
-    X_np   = sample_sem(W_true, N_SAMPLES, noise_std=1.0, seed=SEED_CONV + 1)
+    X_np   = sample_sem(W_true, N_SAMPLES, seed=SEED_CONV + 1)
     X      = to_tensor(X_np)
 
     histories = {}
@@ -142,12 +142,12 @@ def run_metrics_table(denoiser, save_dir):
 
         for seed in range(NUM_SEEDS):
             rng = seed * 1000
-            # W_true = random_dag(d, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
-            #                     weight_high=WEIGHT_HIGH, seed=rng)
+            W_true = random_dag(d, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
+                                weight_high=WEIGHT_HIGH, seed=rng)
             # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
-            W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
-                                    weight_high=WEIGHT_HIGH, seed=rng)
-            X_np = sample_sem(W_true, N_SAMPLES, noise_std=1.0, seed=rng + 1)
+            # W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
+            #                         weight_high=WEIGHT_HIGH, seed=rng)
+            X_np = sample_sem(W_true, N_SAMPLES, seed=rng + 1)
             X    = to_tensor(X_np)
 
             def _record(label, W_np):

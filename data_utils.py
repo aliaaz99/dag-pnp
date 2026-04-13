@@ -114,7 +114,7 @@ def scale_free_dag(
 def sample_sem(
     W: np.ndarray,
     n: int,
-    noise_std: float = 1.0,
+    noise_std: float = 0.5,
     seed: int = None,
 ) -> np.ndarray:
     """

@@ -29,11 +29,11 @@ from dag_config import shared_kwargs, SPARSITY, WEIGHT_LOW, WEIGHT_HIGH, ETA, C,
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_CONV    = 20
+D_CONV    = 50
 N_CONV    = 500
 SEED_CONV = 42
 
-D_FEASIBILITY = [10, 20]
+D_FEASIBILITY = [20, 30, 40, 50, 60]
 N_FEASIBILITY = 500
 NUM_SEEDS     = 5
 SF_M          = 2   # uncomment the scale_free_dag(...) lines below to use SF ground truth
@@ -42,7 +42,6 @@ SF_M          = 2   # uncomment the scale_free_dag(...) lines below to use SF gr
 def _kw(d):
     """d-adaptive shared kwargs, with num_iters overridden for this experiment."""
     kw = shared_kwargs(d)
-    kw["num_iters"] = NUM_ITERS
     return kw
 
 
@@ -65,7 +64,7 @@ def collect_convergence(save_dir: str) -> Dict[str, Dict]:
     # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
     # W_true = scale_free_dag(D_CONV, m=SF_M, weight_low=WEIGHT_LOW,
     #                         weight_high=WEIGHT_HIGH, seed=SEED_CONV)
-    X_np     = sample_sem(W_true, N_CONV, noise_std=1.0, seed=SEED_CONV + 1)
+    X_np     = sample_sem(W_true, N_CONV, seed=SEED_CONV + 1)
     X        = to_tensor(X_np)
     denoiser = IdentityDenoiser()
 
@@ -74,7 +73,7 @@ def collect_convergence(save_dir: str) -> Dict[str, Dict]:
         verbose=False, **kw,
     )
     _, hist_fixed = dag_pnp_fixed_step(
-        X, denoiser, fixed_eta=ETA, **kw,
+        X, denoiser, fixed_eta=kw["eta"], **kw,
     )
 
     for name, hist in [("Barrier-aware", hist_barrier), ("Fixed step", hist_fixed)]:
@@ -120,13 +119,12 @@ def collect_feasibility(save_dir: str) -> Dict[str, List[float]]:
         barrier_viols, fixed_viols = [], []
 
         for seed in range(NUM_SEEDS):
-            # W_true = random_dag(d, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
-            #                     weight_high=WEIGHT_HIGH, seed=seed * 100)
+            W_true = random_dag(d, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
+                                weight_high=WEIGHT_HIGH, seed=seed * 100)
             # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
-            W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
-                                    weight_high=WEIGHT_HIGH, seed=seed * 100)
-            X_np = sample_sem(W_true, N_FEASIBILITY, noise_std=1.0,
-                              seed=seed * 100 + 1)
+            # W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
+            #                         weight_high=WEIGHT_HIGH, seed=seed * 100)
+            X_np = sample_sem(W_true, N_FEASIBILITY, seed=seed * 100 + 1)
             X = to_tensor(X_np)
 
             # Barrier-aware: 0 violations guaranteed by Lemma 1
@@ -135,7 +133,7 @@ def collect_feasibility(save_dir: str) -> Dict[str, List[float]]:
                          "infeasible_steps": 0})
 
             # Fixed step: count actual violations
-            _, hist_f = dag_pnp_fixed_step(X, denoiser, fixed_eta=ETA, **kw)
+            _, hist_f = dag_pnp_fixed_step(X, denoiser, fixed_eta=kw["eta"], **kw)
             n_viol = sum(hist_f["infeasible_steps"])
             fixed_viols.append(n_viol)
             rows.append({"d": d, "seed": seed, "variant": "fixed",

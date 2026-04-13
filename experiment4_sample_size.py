@@ -44,7 +44,7 @@ def get_denoiser():
 # Configuration
 # ===========================================================================
 D         = 20              # fixed graph size
-NUM_SEEDS = 5              # random seeds per n/d point
+NUM_SEEDS = 10              # random seeds per n/d point
 
 # n/d ratios to sweep (x-axis of the plot)
 # Start at 2 (n=20) — at n/d=1 the system X=XW+E is under-determined
@@ -118,17 +118,17 @@ def run_experiment4(save_dir: str = "results"):
 
         for seed in range(NUM_SEEDS):
             rng_offset = seed * 500
-            # W_true = random_dag(D, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
-            #                     weight_high=WEIGHT_HIGH, seed=rng_offset)
+            W_true = random_dag(D, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
+                                weight_high=WEIGHT_HIGH, seed=rng_offset)
             # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
-            W_true = scale_free_dag(D, m=SF_M, weight_low=WEIGHT_LOW,
-                                    weight_high=WEIGHT_HIGH, seed=rng_offset)
-            X_np   = sample_sem(W_true, n, noise_std=1.0, seed=rng_offset + 1)
+            # W_true = scale_free_dag(D, m=SF_M, weight_low=WEIGHT_LOW,
+            #                         weight_high=WEIGHT_HIGH, seed=rng_offset)
+            X_np   = sample_sem(W_true, n, seed=rng_offset + 1)
             X      = to_tensor(X_np)
 
             # ---- NOTEARS ----
             W_n, _ = notears_baseline(
-                X, lambda_data=1.0, lambda_dag=0.02,
+                X, lambda_data=SHARED_KWARGS["lambda_data"], lambda_dag=SHARED_KWARGS["lambda_dag"],
                 num_iters=SHARED_KWARGS["num_iters"], lr=0.001,
                 W_max=SHARED_KWARGS["W_max"], grad_clip=10.0,
             )

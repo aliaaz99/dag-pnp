@@ -49,10 +49,10 @@ def get_denoiser():
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_VALUES  = [10, 20, 50]
+D_VALUES  = [20, 50]
 N_SAMPLES = 500
 SF_M      = 2
-NUM_SEEDS = 5
+NUM_SEEDS = 10
 
 METRICS = ["shd", "acyclicity", "fit_error", "f1"]
 
@@ -108,7 +108,7 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
             W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
                                     weight_high=WEIGHT_HIGH, seed=rng)
 
-        X_np = sample_sem(W_true, n, noise_std=1.0, seed=rng + 1)
+        X_np = sample_sem(W_true, n, seed=rng + 1)
         X    = to_tensor(X_np)
 
         def _record(method_name, W_est_np):
@@ -119,7 +119,7 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
 
         # ---- NOTEARS (increased W_max; see baselines.py) ----
         W_n, _ = notears_baseline(
-            X, lambda_data=1.0, lambda_dag=0.02, num_iters=kw["num_iters"], lr=0.001,
+            X, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"], num_iters=kw["num_iters"], lr=0.001,
             W_max=kw["W_max"], grad_clip=10.0,
         )
         _record("NOTEARS", W_n)
@@ -157,7 +157,7 @@ def run_experiment1(save_dir: str = "results"):
     os.makedirs(save_dir, exist_ok=True)
     denoiser = get_denoiser()
 
-    for graph_family in ["ER", "SF"]:
+    for graph_family in ["ER", "SF"]: # 
         for d in D_VALUES:
             print(f"\n{'='*60}")
             print(f"  {graph_family} graph   d={d}   n={N_SAMPLES}   seeds={NUM_SEEDS}")

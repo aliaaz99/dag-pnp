@@ -31,23 +31,35 @@ import numpy as np
 
 # ── data generation ──────────────────────────────────────────────────────────
 WEIGHT_LOW  = 0.5
-WEIGHT_HIGH = 1.0   # reduced from 2.0 to keep true W inside feasible set
+WEIGHT_HIGH = 1.0   
 SPARSITY    = 0.3
-THRESHOLD   = 0.3   # for converting weighted W to binary graph for evaluation
+THRESHOLD   = 0.3 
 
 # ── fixed hyperparameters (same for all d) ───────────────────────────────────
 LAMBDA_DATA = 1.0
-LAMBDA_DAG  = 0.02   # reduced from 0.1; DAGMA paper uses 0.02–0.05
+LAMBDA_DAG  = 0.01  
 ETA         = 0.005
+ETA_D_REF   = 20     # reference graph size for step-size scaling
 C           = 0.3
 EPSILON     = 1e-6
 ALPHA       = 1.0
 SIGMA_MIN   = 0.01
 SIGMA_MAX   = 0.5
-SMOOTH_BETA = 0.9
+SMOOTH_BETA = 0.0
 DELTA_MIN   = 1e-6
-NUM_ITERS   = 1000   # increased from 500; needed for convergence at d>=20
+NUM_ITERS   = 1000   
 
+
+def dagma_eta(d: int) -> float:
+    """
+    d-adaptive step size cap: eta(d) = ETA * D_REF / d.
+
+    Rationale: gradient magnitudes of L_data scale as O(d) through the
+    covariance structure of the SEM.  Keeping eta * d constant ensures
+    the effective step magnitude is independent of graph size and prevents
+    boundary violations / divergence at large d (≥ 50).
+    """
+    return min(ETA, ETA * ETA_D_REF / d)
 
 def dagma_s(d: int) -> float:
     """
@@ -55,10 +67,10 @@ def dagma_s(d: int) -> float:
 
     Derivation: by Gershgorin, the largest eigenvalue of W o W is bounded by
         rho(W o W) <= sparsity * (d-1) * weight_high^2
-    We use a 20% safety margin above this bound.
+    We use a 50% safety margin above this bound.
     """
     rho_bound = SPARSITY * (d - 1) * WEIGHT_HIGH ** 2
-    return float(1.2 * rho_bound + 1.0)   # +1 keeps it above rho_bound always
+    return float(1.5 * rho_bound + 1.0)   # +1 keeps it above rho_bound always
 
 
 def dagma_W_max(d: int) -> float:
@@ -87,7 +99,8 @@ def shared_kwargs(d: int) -> dict:
         num_iters   = NUM_ITERS,
         lambda_data = LAMBDA_DATA,
         lambda_dag  = LAMBDA_DAG,
-        eta         = ETA,
+        # eta         = ETA,
+        eta         = dagma_eta(d),   # d-adaptive: scales as 1/d
         c           = C,
         epsilon     = EPSILON,
         s           = dagma_s(d),
@@ -110,5 +123,5 @@ if __name__ == "__main__":
         mean_w2   = (WEIGHT_LOW**2 + WEIGHT_LOW*WEIGHT_HIGH + WEIGHT_HIGH**2) / 3
         e_norm    = np.sqrt(exp_edges * mean_w2)
         rho       = SPARSITY * (d - 1) * WEIGHT_HIGH**2
-        print(f"{d:>6}  {dagma_s(d):>8.2f}  {dagma_W_max(d):>8.2f}  "
+        print(f"{d:>6}  {dagma_eta(d):>8.4f}  {dagma_s(d):>8.2f}  {dagma_W_max(d):>8.2f}  "
               f"{e_norm:>12.2f}  {rho:>16.2f}")
