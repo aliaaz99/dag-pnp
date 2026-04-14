@@ -4,8 +4,82 @@ Official Code Repository for the paper [Score-based Generative Modeling of Graph
 
 > 🔴**UPDATE**:  We provide an seperate code repo for **GDSS using Graph Transformer** [here](https://github.com/DongkiKim95/GDSS-Transformer)!
 
-
 In this repository, we implement the *Graph Diffusion via the System of SDEs* (GDSS).
+
+---
+
+## Modifications for Directed Graph (DAG) Generation
+
+This fork extends GDSS to support **directed graphs**, in particular weighted DAGs from linear Structural Equation Models (SEMs). The changes are fully **backward-compatible**: existing undirected-graph configs are unaffected.
+
+### What changed
+
+| File | Change |
+|---|---|
+| `utils/graph_utils.py` | `node_flags` now checks both in- and out-edges, so sink nodes (zero out-degree) are correctly marked active |
+| `utils/graph_utils.py` | `adjs_to_graphs` accepts a `directed` flag and returns `nx.DiGraph` when set |
+| `losses.py` | `get_sde_loss_fn` gains a `sym` parameter — when `False`, adjacency noise is drawn from a full N×N Gaussian instead of the upper-triangular symmetric distribution |
+| `solver.py` | All predictor/corrector classes and both sampler factories (`get_pc_sampler`, `S4_solver`) gain a `sym` parameter; prior sampling switches from `prior_sampling_sym` to `prior_sampling` when `sym=False` |
+| `models/attention.py` | `Attention` and `AttentionLayer` gain a `directed` flag; the `(A+Aᵀ)/2` and `_adj+_adjᵀ` symmetrisations are skipped when `directed=True` |
+| `models/ScoreNetwork_A.py` | `ScoreNetworkA` gains a `directed` parameter and forwards it to every `AttentionLayer` |
+| `utils/loader.py` | Reads `config.data.directed` (default `False`) and injects `directed` into model params and `sym=not directed` into loss/sampling functions; `load_eval_settings` skips undirected MMD metrics for directed graphs |
+| `evaluation/mmd.py` | Fixed deprecated `np.float` → `float` (NumPy ≥ 1.24 compatibility) |
+| `sampler.py` | Skips MMD evaluation (not defined for directed graphs) and uses `nx.DiGraph` for generated graph objects |
+
+To enable directed-graph mode, add one line to your config:
+
+```yaml
+data:
+  directed: true
+```
+
+### Generating SEM / DAG datasets
+
+Two generation scripts are provided in `data/`:
+
+**`data/generate_dag_pnp_data.py`** — uses `random_dag()` from the parent `dag-pnp` package (ERk convention, E[edges] = k·d):
+
+```sh
+# ER4, d=20, 700 graphs
+python data/generate_dag_pnp_data.py --d 20 --k 4 --n_graphs 700
+```
+
+**`data/generate_sem_data.py`** — standalone generator for Erdős-Rényi and scale-free DAGs with weights in [−2,−0.5] ∪ [0.5, 2] (matches the original SEM benchmark):
+
+```sh
+# Erdős-Rényi, p=0.3
+python data/generate_sem_data.py --graph_type ER --d 20 --n_graphs 700
+
+# Scale-free (Barabási-Albert)
+python data/generate_sem_data.py --graph_type SF --d 20 --n_graphs 700
+```
+
+Both scripts produce a `.pkl` file in `data/` containing a list of `nx.DiGraph` objects with float edge weights, ready to be consumed by the GDSS data loader.
+
+### Training on directed graphs
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python main.py --type train --config config/dag_pnp_er4_d20.yaml --seed 42
+```
+
+Ready-made configs are provided for d=20:
+
+- `config/dag_pnp_er4_d20.yaml` — ER4 DAGs using `random_dag()`
+- `config/sem_er_d20.yaml` — ER DAGs using the SEM benchmark generator
+
+### Sampling from a trained directed model
+
+1. Note the checkpoint timestamp printed at the end of training (e.g. `Apr12-02:59:53`).
+2. Set `ckpt:` in `config/sample_sem_er_d20.yaml` (or copy it for your dataset).
+3. Run:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python main.py --type sample --config config/sample_sem_er_d20.yaml --seed 42
+```
+
+Generated graphs are saved as `nx.DiGraph` objects. Standard MMD evaluation is skipped for directed graphs (undirected metrics such as spectral Laplacian and orbit counts are not defined for digraphs); use SHD / SID from `dag-pnp/data_utils.py` to evaluate DAG recovery quality.
+
+---
 
 <p align="center">
     <img width="750" src="assets/concept.jpg"/>
