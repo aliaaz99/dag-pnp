@@ -23,20 +23,27 @@ from typing import Tuple
 
 def random_dag(
     d: int,
-    sparsity: float = 0.3,
+    k: int = 4,
     weight_low: float = 0.5,
-    weight_high: float = 1.0,   
+    weight_high: float = 1.0,
     seed: int = None,
 ) -> np.ndarray:
     """
-    Generate a random weighted DAG with d nodes.
+    Generate a random weighted Erdos-Renyi DAG with expected k*d edges.
 
     Uses a random topological ordering: edges are only added from node i to
     node j when i appears before j in the ordering, guaranteeing acyclicity.
 
+    The per-edge inclusion probability is derived from k:
+        sparsity = 2k / (d - 1)
+    so that E[# edges] = sparsity * d*(d-1)/2 = k*d.
+
+    This matches the ERk convention in the DAGMA paper: ER4 means k=4,
+    giving each graph in expectation 4d directed edges.
+
     Args:
         d:           Number of nodes.
-        sparsity:    Probability of each admissible edge being included.
+        k:           Expected edges per node (e.g. k=4 gives ER4).
         weight_low:  Minimum absolute edge weight.
         weight_high: Maximum absolute edge weight.
         seed:        Optional random seed.
@@ -45,7 +52,9 @@ def random_dag(
            W[i, j] != 0 means a causal edge from variable i to variable j.
     """
     rng = np.random.default_rng(seed)
-    order = rng.permutation(d)          # random topological order
+    order = rng.permutation(d)
+
+    sparsity = min(1.0, 2.0 * k / max(d - 1, 1))
 
     W = np.zeros((d, d))
     for rank_i in range(d):
@@ -64,9 +73,9 @@ def random_dag(
 
 def scale_free_dag(
     d:            int,
-    m:            int   = 2,
+    m:            int   = 4,
     weight_low:   float = 0.5,
-    weight_high:  float = 1.0,  
+    weight_high:  float = 1.0,
     seed:         int   = None,
 ) -> np.ndarray:
     """
@@ -77,9 +86,12 @@ def scale_free_dag(
     with probability proportional to their in-degree + 1 (uniform component
     prevents isolation of the first nodes).
 
+    E[# edges] = m * (d - 1) ≈ m*d, matching the SFk convention in the DAGMA
+    paper: SF4 means m=4, giving each graph in expectation 4d directed edges.
+
     Args:
         d:           Number of nodes.
-        m:           Number of parents each new node attaches to.
+        m:           Parents per new node (e.g. m=4 gives SF4).
         weight_low:  Minimum absolute edge weight.
         weight_high: Maximum absolute edge weight.
         seed:        Optional random seed.
@@ -114,7 +126,7 @@ def scale_free_dag(
 def sample_sem(
     W: np.ndarray,
     n: int,
-    noise_std: float = 0.5,
+    noise_std: float = 1.0,
     seed: int = None,
 ) -> np.ndarray:
     """

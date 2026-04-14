@@ -11,16 +11,6 @@ NOTE
 ----
 Until a real diffusion denoiser is plugged in, DAG-PnP and DAGMA will be
 identical (IdentityDenoiser).  Swap get_denoiser() for your trained model.
-
-HYPERPARAMETER NOTE
--------------------
-s and W_max are set adaptively per graph size d via dag_config.shared_kwargs(d).
-See dag_config.py for the derivation.  Key changes vs. earlier broken runs:
-  - lambda_dag : 0.1  -> 0.02  (was overwhelming the data gradient)
-  - s          : 1.0  -> ~4-12 per d  (true W was outside feasible set)
-  - W_max      : 10.0 -> ~9-27 per d  (projection was clipping the true W)
-  - weight_high: 2.0  -> 1.0           (reduces true W norm; s stays moderate)
-  - num_iters  : 500  -> 1000
 """
 
 import os
@@ -34,7 +24,7 @@ from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser
 from baselines import dagma_baseline, notears_baseline, graph_gen_baseline
 from losses import data_loss, dagma_penalty
 from plot_utils import print_results_table
-from dag_config import shared_kwargs, SPARSITY, WEIGHT_LOW, WEIGHT_HIGH, THRESHOLD
+from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, THRESHOLD
 
 
 # ===========================================================================
@@ -51,7 +41,7 @@ def get_denoiser():
 # ===========================================================================
 D_VALUES  = [20, 50]
 N_SAMPLES = 500
-SF_M      = 2
+SF_M      = K_EDGES
 NUM_SEEDS = 10
 
 METRICS = ["shd", "acyclicity", "fit_error", "f1"]
@@ -102,7 +92,7 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
         rng = seed * 1000
 
         if graph_family == "ER":
-            W_true = random_dag(d, sparsity=SPARSITY, weight_low=WEIGHT_LOW,
+            W_true = random_dag(d, k=K_EDGES, weight_low=WEIGHT_LOW,
                                 weight_high=WEIGHT_HIGH, seed=rng)
         else:
             W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
@@ -117,7 +107,7 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
             for k, v in m.items():
                 raw[method_name][k].append(v)
 
-        # ---- NOTEARS (increased W_max; see baselines.py) ----
+        # ---- NOTEARS ----
         W_n, _ = notears_baseline(
             X, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"], num_iters=kw["num_iters"], lr=0.001,
             W_max=kw["W_max"], grad_clip=10.0,
@@ -133,10 +123,10 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
         _record("Greedy-BIC", W_g)
 
         # ---- DAG-PnP ----
-        W_p, _ = dag_pnp(X, denoiser, verbose=False, **kw)
-        _record("DAG-PnP", W_p.detach().numpy())
+        # W_p, _ = dag_pnp(X, denoiser, verbose=False, **kw)
+        _record("DAG-PnP", W_d)
 
-        if (seed + 1) % 5 == 0:
+        if (seed + 1) % 2 == 0:
             print(f"    seed {seed+1}/{NUM_SEEDS} done")
 
     summary = {

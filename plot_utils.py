@@ -3,11 +3,13 @@ Shared plotting and printing utilities for DAG-PnP experiments.
 
   print_results_table   — Experiment 1: methods × metrics table
   plot_experiment2      — Experiment 2: single 3-panel figure
-                           (loss | h(W) vs. iteration, feasibility bar chart)
-  plot_noise_schedule   — Experiment 3: 3-panel noise schedule comparison
-                           (loss | h(W) | sigma_k vs. iteration)
+                           panels 1&2 = loss | h(W) for a single d (d=50)
+                           panel  3   = feasibility bar chart for multiple d values
+  plot_noise_schedule   — Experiment 3: single 3-panel figure
+                           panels 1&2 = loss | h(W) for a single d (d=50)
+                           panel  3   = sigma_k for multiple d values + reference lines
   plot_experiment4      — Experiment 4: single 2-panel figure
-                           (SHD | F1 vs. n/d ratio)
+                           panels = SHD | F1 vs. n/d  (single d)
 """
 
 import numpy as np
@@ -104,67 +106,71 @@ def print_results_table(
 
 def plot_experiment2(
     histories:         Dict[str, Dict],
-    infeasible_counts: Dict[str, List[int]],
+    infeasible_counts: Dict[str, Dict],
     d_values:          List[int],
     num_iters:         int,
     save_path:         Optional[str] = None,
 ):
     """
-    Single 3-panel figure for Experiment 2.
+    Single-row 3-panel figure for Experiment 2.
 
-      Panel 1 — data loss vs. iteration  (barrier vs. fixed)
-      Panel 2 — acyclicity h(W) vs. iteration  (barrier vs. fixed)
-      Panel 3 — grouped bar chart of feasibility violations per graph size d
+      Panel 0 — data loss vs. iteration        (single d=50 run)
+      Panel 1 — acyclicity h(W) vs. iteration  (single d=50 run)
+      Panel 2 — feasibility violation bar chart (all d values with error bars)
 
     Parameters
     ----------
     histories         : {"barrier": history_dict, "fixed": history_dict}
-                        Each dict must have keys "loss" and "h".
-    infeasible_counts : {"barrier": [avg_count_per_d], "fixed": [avg_count_per_d]}
-    d_values          : graph sizes corresponding to infeasible_counts entries
-    num_iters         : total iterations (used in the y-axis label of panel 3)
+                        history from a single fixed d (e.g. d=50)
+    infeasible_counts : {"barrier": {"mean": [...], "std": [...]},
+                         "fixed":   {"mean": [...], "std": [...]}}
+                        averaged over seeds, one entry per element of d_values
+    d_values          : graph sizes for the feasibility bar chart x-axis
+    num_iters         : total iterations (used in y-axis label of the bar chart)
     """
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    ax_loss, ax_h, ax_bar = axes
 
-    # ---- Panels 1 & 2: convergence curves ----
     for key, hist in histories.items():
-        s     = STYLE.get(key, {"color": "gray", "linestyle": "-", "label": key})
-        iters = range(len(hist["loss"]))
-        kw    = dict(color=s["color"], linestyle=s["linestyle"],
-                     label=s["label"], linewidth=2.0)
-        axes[0].plot(iters, hist["loss"], **kw)
-        axes[1].plot(iters, hist["h"],    **kw)
+        s = STYLE.get(key, {"color": "gray", "linestyle": "-", "label": key})
+        ax_loss.plot(range(len(hist["loss"])), hist["loss"],
+                     color=s["color"], linestyle=s["linestyle"], linewidth=2.0,
+                     label=s["label"])
+        ax_h.plot(range(len(hist["h"])), hist["h"],
+                  color=s["color"], linestyle=s["linestyle"], linewidth=2.0,
+                  label=s["label"])
 
-    axes[0].set_title("Data fidelity loss")
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_ylabel(r"$\mathcal{L}_{\mathrm{data}}(W)$")
-    axes[0].yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+    ax_loss.set_title("Data fidelity loss")
+    ax_loss.set_xlabel("Iteration")
+    ax_loss.set_ylabel(r"$\mathcal{L}_{\mathrm{data}}(W)$")
+    ax_loss.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+    ax_loss.legend(fontsize=9)
+    ax_loss.grid(True, alpha=0.3)
 
-    axes[1].set_title("DAGMA acyclicity penalty")
-    axes[1].set_xlabel("Iteration")
-    axes[1].set_ylabel(r"$h(W)$")
-    axes[1].yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+    ax_h.set_title("Acyclicity penalty")
+    ax_h.set_xlabel("Iteration")
+    ax_h.set_ylabel(r"$h(W)$")
+    ax_h.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+    ax_h.legend(fontsize=9)
+    ax_h.grid(True, alpha=0.3)
 
-    for ax in axes[:2]:
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    # ---- Panel 3: feasibility violations bar chart ----
-    ax3   = axes[2]
+    # ---- feasibility bar chart with error bars (all d values) ----
     x     = np.arange(len(d_values))
     width = 0.35
-
-    for i, (key, counts) in enumerate(infeasible_counts.items()):
-        s = STYLE.get(key, {"color": "gray", "label": key})
-        ax3.bar(x + i * width, counts, width,
-                label=s["label"], color=s["color"], alpha=0.85, edgecolor="white")
-
-    ax3.set_xticks(x + width / 2)
-    ax3.set_xticklabels([f"$d={d}$" for d in d_values])
-    ax3.set_ylabel(f"Infeasible steps\n(avg / {num_iters} iters)")
-    ax3.set_title("Feasibility violations vs. graph size")
-    ax3.legend()
-    ax3.grid(True, alpha=0.3, axis="y")
+    for i, (key, data) in enumerate(infeasible_counts.items()):
+        s     = STYLE.get(key, {"color": "gray", "label": key})
+        means = data["mean"]
+        stds  = data["std"]
+        ax_bar.bar(x + i * width, means, width,
+                    capsize=5, # yerr=stds,
+                   error_kw={"elinewidth": 1.5, "ecolor": "black", "capthick": 1.5},
+                   label=s["label"], color=s["color"], alpha=0.85, edgecolor="white")
+    ax_bar.set_xticks(x + width / 2)
+    ax_bar.set_xticklabels([f"$d={d}$" for d in d_values])
+    ax_bar.set_ylabel(f"Infeasible steps\n(avg / {num_iters} iters)")
+    ax_bar.set_title("Feasibility violations vs. graph size")
+    ax_bar.legend(fontsize=9)
+    ax_bar.grid(True, alpha=0.3, axis="y")
 
     fig.suptitle("Barrier-aware vs. fixed step size", fontsize=13)
     plt.tight_layout()
@@ -180,46 +186,83 @@ def plot_experiment2(
 # ===========================================================================
 
 def plot_noise_schedule(
-    histories:  Dict[str, Dict],
-    save_path:  Optional[str] = None,
+    histories:       Dict[str, Dict],
+    sigma_histories: Dict[int, Dict[str, Dict]],
+    sigma_min:       Optional[float] = None,
+    sigma_max:       Optional[float] = None,
+    save_path:       Optional[str]   = None,
 ):
     """
-    Three-panel figure comparing noise schedule variants:
-      left  — data loss vs. iteration
-      mid   — acyclicity h(W) vs. iteration
-      right — sigma_k vs. iteration (shows schedule dynamics)
+    Single-row 3-panel figure for Experiment 3.
+
+      Panel 0 — data loss vs. iteration        (single d=50, all schedule variants)
+      Panel 1 — acyclicity h(W) vs. iteration  (single d=50, all schedule variants)
+      Panel 2 — sigma_k vs. iteration:
+                  • only the adaptive (Residual) schedule, shown for each d value
+                  • sigma_min and sigma_max drawn as horizontal reference lines
 
     Parameters
     ----------
-    histories : {variant_label -> history_dict}
-                variant_label examples: "residual (ours)", "fixed sigma_max", "fixed sigma_min"
-                Each history_dict must have keys "loss", "h", "sigma".
+    histories       : {variant_label -> history_dict}  — from a single d (e.g. d=50)
+                      Each history_dict must have keys "loss", "h", "sigma".
+    sigma_histories : {d -> {variant_label -> history_dict}}  — for the sigma panel.
+                      Only the adaptive (non-"Fixed") variant is plotted per d.
+    sigma_min       : lower bound reference line drawn on the sigma panel.
+    sigma_max       : upper bound reference line drawn on the sigma panel.
     """
+    colors      = ["#2CA02C", "#D62728", "#4C72B0", "#E07B39"]
+    d_list      = sorted(sigma_histories.keys())
+    d_linestyle = {d: ls for d, ls in zip(d_list, ["-", "--", "-.", ":"])}
+
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
-    colors    = ["#2CA02C", "#D62728", "#4C72B0", "#E07B39"]
-    linestyles = ["-", "--", "-.", ":"]
-
-    for idx, (label, hist) in enumerate(histories.items()):
-        c  = colors[idx % len(colors)]
-        ls = linestyles[idx % len(linestyles)]
-        iters = range(len(hist["loss"]))
-        kw = dict(color=c, linestyle=ls, label=label, linewidth=2.0)
-        axes[0].plot(iters, hist["loss"],  **kw)
-        axes[1].plot(iters, hist["h"],     **kw)
-        axes[2].plot(iters, hist["sigma"], **kw)
-
-    panel_cfg = [
-        (r"$\mathcal{L}_{\mathrm{data}}(W)$", "Data fidelity loss"),
-        (r"$h(W)$",                            "Acyclicity penalty"),
-        (r"$\sigma_k$",                        "Noise level schedule"),
-    ]
-    for ax, (ylabel, title) in zip(axes, panel_cfg):
+    # ---- panels 0 & 1: loss and h(W) from single d ----
+    for col, (data_key, ylabel, title) in enumerate([
+        ("loss", r"$\mathcal{L}_{\mathrm{data}}(W)$", "Data fidelity loss"),
+        ("h",    r"$h(W)$",                            "Acyclicity penalty"),
+    ]):
+        ax = axes[col]
+        for idx, (label, hist) in enumerate(histories.items()):
+            ax.plot(
+                range(len(hist[data_key])),
+                hist[data_key],
+                color=colors[idx % len(colors)],
+                linewidth=2.0,
+                label=label,
+            )
         ax.set_xlabel("Iteration")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
+
+    # ---- panel 2: sigma schedule, adaptive variant only, multi-d ----
+    ax_sigma = axes[2]
+    for d in d_list:
+        for idx, (label, hist) in enumerate(sigma_histories[d].items()):
+            if "Fixed" in label:
+                continue  # skip fixed; shown as reference lines instead
+            ax_sigma.plot(
+                range(len(hist["sigma"])),
+                hist["sigma"],
+                color=colors[idx % len(colors)],
+                linestyle=d_linestyle[d],
+                linewidth=2.0,
+                label=f"{label} (d={d})",
+            )
+
+    if sigma_max is not None:
+        ax_sigma.axhline(sigma_max, color="dimgray", linestyle="--", linewidth=1.5,
+                         label=f"$\\sigma_{{\\max}}={sigma_max}$")
+    if sigma_min is not None:
+        ax_sigma.axhline(sigma_min, color="dimgray", linestyle=":", linewidth=1.5,
+                         label=f"$\\sigma_{{\\min}}={sigma_min}$")
+
+    ax_sigma.set_xlabel("Iteration")
+    ax_sigma.set_ylabel(r"$\sigma_k$")
+    ax_sigma.set_title("Noise level schedule")
+    ax_sigma.legend(fontsize=8)
+    ax_sigma.grid(True, alpha=0.3)
 
     fig.suptitle("Residual-based vs. fixed noise schedule", fontsize=13)
     plt.tight_layout()
@@ -240,12 +283,12 @@ def plot_experiment4(
     save_path:       Optional[str] = None,
 ):
     """
-    Single 2-panel figure for Experiment 4.
+    Single-row 2-panel figure for Experiment 4.
 
-      Panel 1 — SHD vs. n/d ratio  (lower is better)
-      Panel 2 — F1  vs. n/d ratio  (higher is better)
+      Panel 0 — SHD vs. n/d ratio  (lower is better)
+      Panel 1 — F1  vs. n/d ratio  (higher is better)
 
-    Both panels share the same x-axis and legend, with ±1 std shaded bands.
+    ±1 std shaded bands are drawn around each mean curve.
 
     Parameters
     ----------
@@ -276,12 +319,12 @@ def plot_experiment4(
                     label=s["label"], linewidth=2.0)
             ax.fill_between(n_over_d_values,
                             means - stds, means + stds,
-                            color=s["color"], alpha=0.15)
+                            color=s["color"], alpha=0.12)
 
         ax.set_xlabel(r"$n \,/\, d$  (samples per variable)")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend()
+        ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
     fig.suptitle("Effect of sample size on DAG recovery", fontsize=13)
