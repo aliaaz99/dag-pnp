@@ -81,6 +81,148 @@ class GaussianShrinkageDenoiser:
     def __call__(self, W: torch.Tensor, sigma: float) -> torch.Tensor:
         shrinkage = self.prior_std ** 2 / (self.prior_std ** 2 + sigma ** 2)
         return shrinkage * W.clone()
+    
+
+class GDSSDiffusionDenoiser:
+    """
+    Diffusion-model denoiser backed by a trained GDSS score network.
+
+    Implements Tweedie's formula (posterior mean) for the VP-SDE:
+
+        adj_hat0 = (adj_t + std(t)² · score(adj_t, t)) / mean_coeff(t)
+
+    where:
+      - adj_t   is the noisy adjacency (the PnP iterate W, treated as a
+                sample from the VP-SDE marginal at diffusion time t)
+      - t       is found by inverting std(t) = sigma via binary search
+      - score   is  ∇_{adj_t} log p_t(adj_t)  from the trained score network
+      - mean_coeff(t) = exp(-0.25·t²·(β₁-β₀) - 0.5·t·β₀)  (VP-SDE scaling)
+
+    Node features are fixed to all-ones, consistent with `init: ones` training.
+    All nodes are treated as active (flags = 1).
+
+    Args
+    ----
+    model_adj    : trained ScoreNetworkA / ScoreNetworkA_Transformer
+    model_x      : trained ScoreNetworkX / ScoreNetworkX_Transformer
+    sde_adj      : VPSDE instance used for adjacency during training
+    max_feat_num : F — number of node features (config.data.max_feat_num)
+    device       : torch.device or str
+    t_min        : lower bound for the t search (avoids t=0 instability)
+    """
+
+    def __init__(self, model_adj, model_x, sde_adj, max_feat_num: int,
+                 device, t_min: float = 1e-4):
+        import sys, os
+        _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
+        if _gdss_dir not in sys.path:
+            sys.path.insert(0, _gdss_dir)
+        from losses import get_score_fn  # gdss/losses.py
+
+        self.model_adj    = model_adj
+        self.model_x      = model_x
+        self.sde          = sde_adj
+        self.max_feat_num = max_feat_num
+        self.device       = torch.device(device) if isinstance(device, str) else device
+        self.t_min        = t_min
+        self.score_fn     = get_score_fn(sde_adj, model_adj, train=False, continuous=True)
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_checkpoint(cls, ckpt_path: str, device: str = 'cpu', t_min: float = 1e-4):
+        """
+        Load a GDSSDiffusionDenoiser directly from a saved .pth checkpoint.
+
+        Args
+        ----
+        ckpt_path : absolute path to a GDSS checkpoint, e.g.
+                    'gdss/checkpoints/sem_SF_d20/Apr15-15:58:08.pth'
+        device    : 'cpu' or 'cuda:0' etc.
+        t_min     : lower bound for the t search
+        Returns
+        -------
+        GDSSDiffusionDenoiser ready for inference
+        """
+        import sys, os
+        _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
+        if _gdss_dir not in sys.path:
+            sys.path.insert(0, _gdss_dir)
+        from utils.loader import load_model_from_ckpt, load_sde
+
+        ckpt       = torch.load(ckpt_path, map_location=device)
+        cfg        = ckpt['model_config']
+        model_adj  = load_model_from_ckpt(ckpt['params_adj'], ckpt['adj_state_dict'], device)
+        model_x    = load_model_from_ckpt(ckpt['params_x'],   ckpt['x_state_dict'],   device)
+        sde_adj    = load_sde(cfg.sde.adj)
+
+        return cls(model_adj, model_x, sde_adj, cfg.data.max_feat_num, device, t_min)
+
+    # ------------------------------------------------------------------
+    def _sigma_to_t(self, sigma: float) -> float:
+        """Binary search: find t in [t_min, T] such that std(t) ≈ sigma."""
+        dummy = torch.zeros(1, 1, 1, device=self.device)
+        lo, hi = self.t_min, float(self.sde.T)
+        for _ in range(64):          # 64 bisections → error < 1e-18
+            mid = (lo + hi) * 0.5
+            t_mid = torch.tensor([mid], device=self.device)
+            _, std = self.sde.marginal_prob(dummy, t_mid)
+            if std.item() < sigma:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) * 0.5
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def __call__(self, W: torch.Tensor, sigma: float) -> torch.Tensor:
+        """
+        Tweedie denoising at noise level sigma.
+
+        Args
+        ----
+        W     : (d, d) noisy adjacency matrix  (current PnP iterate)
+        sigma : noise level used to select diffusion time t via std(t)=sigma
+        Returns
+        -------
+        (d, d) posterior-mean denoised adjacency estimate
+        """
+        d = W.shape[0]
+
+        # ---- map sigma → t  ------------------------------------------
+        t_val = self._sigma_to_t(sigma)
+        t     = torch.tensor([t_val], device=self.device, dtype=torch.float32)
+
+        # ---- prepare batched inputs  ----------------------------------
+        adj_t = W.unsqueeze(0).to(device=self.device, dtype=torch.float32)  # (1,d,d)
+        x     = torch.ones(1, d, self.max_feat_num, device=self.device)
+        flags = torch.ones(1, d, device=self.device)
+
+        # ---- VP-SDE marginal at t  ------------------------------------
+        #   p_t(adj_t | adj_0) = N( mean_coeff · adj_0,  std² · I )
+        dummy = torch.zeros_like(adj_t)
+        _, std_t = self.sde.marginal_prob(dummy, t)            # std_t: (1,)
+        log_mean_coeff = (
+            -0.25 * t ** 2 * (self.sde.beta_1 - self.sde.beta_0)
+            - 0.5  * t      *  self.sde.beta_0
+        )
+        mean_coeff_t = torch.exp(log_mean_coeff)               # (1,)
+
+        # ---- score  ∇_{adj_t} log p_t(adj_t)  ------------------------
+        #   get_score_fn returns:  score = -ε_pred / std
+        score = self.score_fn(x, adj_t, flags, t)              # (1, d, d)
+
+        # ---- Tweedie's formula  --------------------------------------
+        #   adj_hat0 = ( adj_t + std² · score ) / mean_coeff
+        #            = ( adj_t − std · ε_pred ) / mean_coeff
+        std_sq   = (std_t        ** 2).view(1, 1, 1)
+        mean_c   =  mean_coeff_t      .view(1, 1, 1)
+        adj_hat0 = (adj_t + std_sq * score) / mean_c           # (1, d, d)
+
+        return adj_hat0.squeeze(0).cpu()
+
+
+# kept for backwards compatibility — was the placeholder stub
+DiffusionDenoiser = GDSSDiffusionDenoiser
 
 
 # ===========================================================================
