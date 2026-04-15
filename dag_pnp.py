@@ -117,7 +117,7 @@ class GDSSDiffusionDenoiser:
         _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
         if _gdss_dir not in sys.path:
             sys.path.insert(0, _gdss_dir)
-        from losses import get_score_fn  # gdss/losses.py
+        from gdss.losses import get_score_fn  # gdss/losses.py
 
         self.model_adj    = model_adj
         self.model_x      = model_x
@@ -147,7 +147,7 @@ class GDSSDiffusionDenoiser:
         _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
         if _gdss_dir not in sys.path:
             sys.path.insert(0, _gdss_dir)
-        from utils.loader import load_model_from_ckpt, load_sde
+        from gdss.utils.loader import load_model_from_ckpt, load_sde
 
         ckpt       = torch.load(ckpt_path, map_location=device)
         cfg        = ckpt['model_config']
@@ -220,9 +220,6 @@ class GDSSDiffusionDenoiser:
 
         return adj_hat0.squeeze(0).cpu()
 
-
-# kept for backwards compatibility — was the placeholder stub
-DiffusionDenoiser = GDSSDiffusionDenoiser
 
 
 # ===========================================================================
