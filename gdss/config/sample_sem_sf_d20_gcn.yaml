@@ -1,0 +1,19 @@
+data:
+  data: sem_SF_d20
+
+ckpt: Apr15-19:25:01
+
+sampler:
+  predictor: Euler
+  corrector: Langevin
+  snr: 0.05
+  scale_eps: 0.7
+  n_steps: 1
+
+sample:
+  use_ema: False
+  noise_removal: True
+  probability_flow: False
+  eps: 1.0e-4
+  seed: 42
+  quantize_thr: 0.5

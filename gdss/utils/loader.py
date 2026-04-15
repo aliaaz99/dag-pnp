@@ -4,6 +4,7 @@ import numpy as np
 
 from models.ScoreNetwork_A import ScoreNetworkA
 from models.ScoreNetwork_X import ScoreNetworkX, ScoreNetworkX_GMH
+from models.ScoreNetwork_Transformer import ScoreNetworkA_Transformer, ScoreNetworkX_Transformer
 from sde import VPSDE, VESDE, subVPSDE
 
 from losses import get_sde_loss_fn
@@ -43,6 +44,10 @@ def load_model(params):
         model = ScoreNetworkX_GMH(**params_)
     elif model_type == 'ScoreNetworkA':
         model = ScoreNetworkA(**params_)
+    elif model_type == 'ScoreNetworkA_Transformer':
+        model = ScoreNetworkA_Transformer(**params_)
+    elif model_type == 'ScoreNetworkX_Transformer':
+        model = ScoreNetworkX_Transformer(**params_)
     else:
         raise ValueError(f"Model Name <{model_type}> is Unknown")
     return model
@@ -152,20 +157,50 @@ def load_sampling_fn(config_train, config_module, config_sample, device):
 def load_model_params(config):
     config_m = config.model
     max_feat_num = config.data.max_feat_num
-
-    if 'GMH' in config_m.x:
-        params_x = {'model_type': config_m.x, 'max_feat_num': max_feat_num, 'depth': config_m.depth, 
-                    'nhid': config_m.nhid, 'num_linears': config_m.num_linears,
-                    'c_init': config_m.c_init, 'c_hid': config_m.c_hid, 'c_final': config_m.c_final, 
-                    'adim': config_m.adim, 'num_heads': config_m.num_heads, 'conv':config_m.conv}
-    else:
-        params_x = {'model_type':config_m.x, 'max_feat_num':max_feat_num, 'depth':config_m.depth, 'nhid':config_m.nhid}
     directed = getattr(config.data, 'directed', False)
-    params_adj = {'model_type':config_m.adj, 'max_feat_num':max_feat_num, 'max_node_num':config.data.max_node_num,
-                    'nhid':config_m.nhid, 'num_layers':config_m.num_layers, 'num_linears':config_m.num_linears,
-                    'c_init':config_m.c_init, 'c_hid':config_m.c_hid, 'c_final':config_m.c_final,
-                    'adim':config_m.adim, 'num_heads':config_m.num_heads, 'conv':config_m.conv,
-                    'directed':directed}
+
+    if 'Transformer' in config_m.x or 'Transformer' in config_m.adj:
+        # Transformer-based score networks (DIRECTO dual-attention backbone)
+        tf_kwargs = dict(
+            n_layers = getattr(config_m, 'n_layers', 5),
+            dx       = getattr(config_m, 'dx',       128),
+            de       = getattr(config_m, 'de',       64),
+            dy       = getattr(config_m, 'dy',       64),
+            n_head   = getattr(config_m, 'n_head',   4),
+            dim_ffX  = getattr(config_m, 'dim_ffX',  256),
+            dim_ffE  = getattr(config_m, 'dim_ffE',  128),
+            dropout  = getattr(config_m, 'dropout',  0.0),
+        )
+        params_x = {'model_type': config_m.x,
+                    'max_feat_num': max_feat_num,
+                    'depth': tf_kwargs['n_layers'],
+                    **tf_kwargs}
+        params_adj = {'model_type': config_m.adj,
+                      'max_feat_num': max_feat_num,
+                      'max_node_num': config.data.max_node_num,
+                      **tf_kwargs}
+    elif 'GMH' in config_m.x:
+        params_x = {'model_type': config_m.x, 'max_feat_num': max_feat_num, 'depth': config_m.depth,
+                    'nhid': config_m.nhid, 'num_linears': config_m.num_linears,
+                    'c_init': config_m.c_init, 'c_hid': config_m.c_hid, 'c_final': config_m.c_final,
+                    'adim': config_m.adim, 'num_heads': config_m.num_heads, 'conv': config_m.conv}
+        params_adj = {'model_type': config_m.adj, 'max_feat_num': max_feat_num,
+                      'max_node_num': config.data.max_node_num,
+                      'nhid': config_m.nhid, 'num_layers': config_m.num_layers,
+                      'num_linears': config_m.num_linears,
+                      'c_init': config_m.c_init, 'c_hid': config_m.c_hid, 'c_final': config_m.c_final,
+                      'adim': config_m.adim, 'num_heads': config_m.num_heads, 'conv': config_m.conv,
+                      'directed': directed}
+    else:
+        params_x = {'model_type': config_m.x, 'max_feat_num': max_feat_num,
+                    'depth': config_m.depth, 'nhid': config_m.nhid}
+        params_adj = {'model_type': config_m.adj, 'max_feat_num': max_feat_num,
+                      'max_node_num': config.data.max_node_num,
+                      'nhid': config_m.nhid, 'num_layers': config_m.num_layers,
+                      'num_linears': config_m.num_linears,
+                      'c_init': config_m.c_init, 'c_hid': config_m.c_hid, 'c_final': config_m.c_final,
+                      'adim': config_m.adim, 'num_heads': config_m.num_heads, 'conv': config_m.conv,
+                      'directed': directed}
     return params_x, params_adj
 
 

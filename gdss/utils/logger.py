@@ -71,9 +71,17 @@ def sde_log(logger, config_sde):
 
 def model_log(logger, config):
     config_m = config.model
-    model_log = f'({config_m.x})+({config_m.adj}={config_m.conv},{config_m.num_heads})   : '\
-                f'depth={config_m.depth} adim={config_m.adim} nhid={config_m.nhid} layers={config_m.num_layers} '\
-                f'linears={config_m.num_linears} c=({config_m.c_init} {config_m.c_hid} {config_m.c_final})'
+    if getattr(config_m, 'conv', None) is not None:
+        # Original GCN-based score networks
+        model_log = f'({config_m.x})+({config_m.adj}={config_m.conv},{config_m.num_heads})   : '\
+                    f'depth={config_m.depth} adim={config_m.adim} nhid={config_m.nhid} layers={config_m.num_layers} '\
+                    f'linears={config_m.num_linears} c=({config_m.c_init} {config_m.c_hid} {config_m.c_final})'
+    else:
+        # Transformer-based score networks (DIRECTO dual-attention backbone)
+        model_log = f'({config_m.x})+({config_m.adj})   : '\
+                    f'n_layers={getattr(config_m, "n_layers", "?")} '\
+                    f'dx={getattr(config_m, "dx", "?")} de={getattr(config_m, "de", "?")} '\
+                    f'dy={getattr(config_m, "dy", "?")} n_head={getattr(config_m, "n_head", "?")}'
     logger.log(model_log)
 
 

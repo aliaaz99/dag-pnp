@@ -56,9 +56,9 @@ class Attention(torch.nn.Module):
     def get_gnn(self, in_dim, attn_dim, out_dim, conv='GCN'):
 
         if conv == 'GCN':
-            gnn_q = DenseGCNConv(in_dim, attn_dim)
-            gnn_k = DenseGCNConv(in_dim, attn_dim)
-            gnn_v = DenseGCNConv(in_dim, out_dim)
+            gnn_q = DenseGCNConv(in_dim, attn_dim, directed=self.directed)
+            gnn_k = DenseGCNConv(in_dim, attn_dim, directed=self.directed)
+            gnn_v = DenseGCNConv(in_dim, out_dim, directed=self.directed)
 
             return gnn_q, gnn_k, gnn_v
 
@@ -66,7 +66,7 @@ class Attention(torch.nn.Module):
             num_layers=2
             gnn_q = MLP(num_layers, in_dim, 2*attn_dim, attn_dim, activate_func=torch.tanh)
             gnn_k = MLP(num_layers, in_dim, 2*attn_dim, attn_dim, activate_func=torch.tanh)
-            gnn_v = DenseGCNConv(in_dim, out_dim)
+            gnn_v = DenseGCNConv(in_dim, out_dim, directed=self.directed)
 
             return gnn_q, gnn_k, gnn_v
 

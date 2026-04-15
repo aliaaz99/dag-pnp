@@ -68,7 +68,25 @@ class Sampler(object):
 
             logger.log(f"Round {r} : {time.time()-t_start:.2f}s")
 
-            samples_int = quantize(adj)
+            thr = getattr(getattr(self.config, 'sample', object()), 'quantize_thr', 0.5)
+
+            if r == 0:
+                adj_abs = adj.abs()
+                n_diag = adj_abs.shape[-1]
+                eye = torch.eye(n_diag, device=adj_abs.device).unsqueeze(0)
+                diag_abs = torch.diagonal(adj_abs, dim1=-2, dim2=-1)
+                offdiag_abs = adj_abs * (1 - eye)
+                logger.log(f"[diag] raw |adj|: frac>thr(all)={(adj_abs > thr).float().mean():.4f} "
+                           f"frac>thr(offdiag)={(offdiag_abs > thr).float().mean():.4f} "
+                           f"diag_mean={diag_abs.mean():.4f} diag_frac>thr={(diag_abs > thr).float().mean():.4f} "
+                           f"=> est offdiag edges/graph={(offdiag_abs > thr).float().sum() / adj_abs.shape[0]:.1f}")
+
+            # Zero diagonal before quantization — self-loops are never valid and
+            # the reverse SDE can leave noise on diagonal entries.
+            n = adj.shape[-1]
+            eye = torch.eye(n, device=adj.device).unsqueeze(0)
+            adj = adj * (1 - eye)
+            samples_int = quantize(adj, thr=thr)
             directed = getattr(self.configt.data, 'directed', False)
             gen_graph_list.extend(adjs_to_graphs(samples_int, True, directed=directed))
 

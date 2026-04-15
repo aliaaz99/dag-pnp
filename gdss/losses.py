@@ -9,11 +9,15 @@ def get_score_fn(sde, model, train=True, continuous=True):
     model.eval()
   model_fn = model
 
+  # Detect whether the underlying model wants t injected (e.g. transformer).
+  _model = model_fn.module if hasattr(model_fn, 'module') else model_fn
+  _takes_time = getattr(_model, 'takes_time', False)
+
   if isinstance(sde, VPSDE) or isinstance(sde, subVPSDE):
     def score_fn(x, adj, flags, t):
       # Scale neural network output by standard deviation and flip sign
       if continuous:
-        score = model_fn(x, adj, flags)
+        score = model_fn(x, adj, flags, t=t) if _takes_time else model_fn(x, adj, flags)
         std = sde.marginal_prob(torch.zeros_like(adj), t)[1]
       else:
         raise NotImplementedError(f"Discrete not supported")
@@ -23,8 +27,8 @@ def get_score_fn(sde, model, train=True, continuous=True):
   elif isinstance(sde, VESDE):
     def score_fn(x, adj, flags, t):
       if continuous:
-        score = model_fn(x, adj, flags)
-      else:  
+        score = model_fn(x, adj, flags, t=t) if _takes_time else model_fn(x, adj, flags)
+      else:
         raise NotImplementedError(f"Discrete not supported")
       return score
 

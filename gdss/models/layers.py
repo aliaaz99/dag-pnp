@@ -25,12 +25,13 @@ def reset(value: Any):
 class DenseGCNConv(torch.nn.Module):
     r"""See :class:`torch_geometric.nn.conv.GCNConv`.
     """
-    def __init__(self, in_channels, out_channels, improved=False, bias=True):
+    def __init__(self, in_channels, out_channels, improved=False, bias=True, directed=False):
         super(DenseGCNConv, self).__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.improved = improved
+        self.directed = directed
 
         self.weight = Parameter(torch.Tensor(self.in_channels, out_channels))
 
@@ -74,9 +75,15 @@ class DenseGCNConv(torch.nn.Module):
             adj[:, idx, idx] = 1 if not self.improved else 2
 
         out = torch.matmul(x, self.weight)
-        deg_inv_sqrt = adj.sum(dim=-1).clamp(min=1).pow(-0.5)
 
-        adj = deg_inv_sqrt.unsqueeze(-1) * adj * deg_inv_sqrt.unsqueeze(-2)
+        if self.directed:
+            deg_out_inv_sqrt = adj.sum(dim=-1).clamp(min=1).pow(-0.5)
+            deg_in_inv_sqrt  = adj.sum(dim=-2).clamp(min=1).pow(-0.5)
+            adj = deg_out_inv_sqrt.unsqueeze(-1) * adj * deg_in_inv_sqrt.unsqueeze(-2)
+        else:
+            deg_inv_sqrt = adj.sum(dim=-1).clamp(min=1).pow(-0.5)
+            adj = deg_inv_sqrt.unsqueeze(-1) * adj * deg_inv_sqrt.unsqueeze(-2)
+
         out = torch.matmul(adj, out)
 
         if self.bias is not None:

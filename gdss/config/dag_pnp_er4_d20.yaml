@@ -23,11 +23,11 @@ sde:
 model:
   x: ScoreNetworkX
   adj: ScoreNetworkA
-  conv: GCN
+  conv: GCN           # DenseGCNConv now uses D_out^{-1/2} A D_in^{-1/2} for directed graphs
   num_heads: 4
   depth: 3
-  adim: 32
-  nhid: 32
+  adim: 64            # increased from 32 — directed adj has 2x the free parameters vs undirected
+  nhid: 64            # increased from 32
   num_layers: 5
   num_linears: 2
   c_init: 2

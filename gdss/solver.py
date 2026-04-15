@@ -183,6 +183,9 @@ def get_pc_sampler(sde_x, sde_adj, shape_x, shape_adj, predictor='Euler', correc
       timesteps = torch.linspace(sde_adj.T, eps, diff_steps, device=device)
 
       # -------- Reverse diffusion process --------
+      _n = shape_adj[-1]
+      _eye = torch.eye(_n, device=device).unsqueeze(0)  # (1, N, N)
+
       for i in trange(0, (diff_steps), desc = '[Sampling]', position = 1, leave=False):
         t = timesteps[i]
         vec_t = torch.ones(shape_adj[0], device=t.device) * t
@@ -194,6 +197,12 @@ def get_pc_sampler(sde_x, sde_adj, shape_x, shape_adj, predictor='Euler', correc
         _x = x
         x, x_mean = predictor_obj_x.update_fn(x, adj, flags, vec_t)
         adj, adj_mean = predictor_obj_adj.update_fn(_x, adj, flags, vec_t)
+
+        # Zero diagonal at every step — self-loops are never valid and
+        # leaving diagonal noise in adj corrupts the score network's attention.
+        adj      = adj      * (1 - _eye)
+        adj_mean = adj_mean * (1 - _eye)
+
       print(' ')
       return (x_mean if denoise else x), (adj_mean if denoise else adj), diff_steps * (n_steps + 1)
   return pc_sampler

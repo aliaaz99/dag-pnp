@@ -93,7 +93,7 @@ def gen_noise(x, flags, sym=True):
 
 # -------- Quantize generated graphs --------
 def quantize(adjs, thr=0.5):
-    adjs_ = torch.where(adjs < thr, torch.zeros_like(adjs), torch.ones_like(adjs))
+    adjs_ = torch.where(adjs.abs() < thr, torch.zeros_like(adjs), torch.ones_like(adjs))
     return adjs_
 
 
