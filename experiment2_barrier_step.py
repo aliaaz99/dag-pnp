@@ -1,176 +1,266 @@
 """
-Experiment 2: Barrier-aware step size vs. fixed step size.
+Experiment 2: Barrier-aware step size vs. fixed step size — numerical results.
 
-Produces a single 3-panel figure:
-  Panel 1 — data loss vs. iteration  (convergence, single run at d=50)
-  Panel 2 — acyclicity h(W) vs. iteration  (convergence, single run at d=50)
-  Panel 3 — grouped bar chart of feasibility violations per graph size d
-             (averaged over NUM_SEEDS seeds, both d=20 and d=50)
+Evaluates four configurations defined by the cross-product of:
+  (1) Step-size rule  : fixed η  vs. barrier-aware (adaptive) η
+  (2) Projection step : off      vs. on  (_project_onto_K after denoiser)
 
-Output files (written to save_dir):
-  exp2.png              — the combined 3-panel figure
-  exp2_convergence.csv  — per-iteration data for panels 1 & 2
-  exp2_feasibility.csv  — per-seed violation counts for panel 3
+For each configuration and each d in D_VALUES, runs NUM_SEEDS random seeds
+and reports mean ± std of:
+  SHD, F1, L_data, h(W), infeasible steps (gradient steps that left W_s)
+
+Outputs (written to save_dir):
+  exp2_results.csv      — per-seed raw values
+  exp2_summary.csv      — mean ± std summary (one row per config × d)
+  exp2_summary.tex      — LaTeX tabular (copy-paste ready)
 """
 
 import os
 import csv
 import numpy as np
 import torch
+from collections import defaultdict
 from typing import Dict, List
 
-from data_utils import random_dag, sample_sem, to_tensor, scale_free_dag
+from data_utils import random_dag, sample_sem, evaluate_dag, to_tensor, scale_free_dag
 from dag_pnp import dag_pnp, IdentityDenoiser
 from baselines import dag_pnp_fixed_step
-from plot_utils import plot_experiment2
-from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, ETA, C, EPSILON, NUM_ITERS
+from losses_dag import data_loss, dagma_penalty
+from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, NORMALISE, get_threshold
 
 
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_CONV    = 50        # graph size for convergence panels 1 & 2
-N_CONV    = 500
-SEED_CONV = 42
+D_VALUES  = [50]
+N_SAMPLES = 500
+NUM_SEEDS = 10
+SF_M      = K_EDGES
 
-D_FEASIBILITY = [20, 50]   # graph sizes for feasibility bar chart (panel 3)
-N_FEASIBILITY = 500
-NUM_SEEDS     = 10
-SF_M          = K_EDGES
+CONFIGS = [
+    # (label,              step_type,  project)
+    ("Fixed + No Proj",    "fixed",    False),
+    ("Fixed + Proj",       "fixed",    True),
+    ("Barrier + No Proj",  "barrier",  False),
+    ("Barrier + Proj",     "barrier",  True),
+]
+
+METRICS = ["shd", "f1", "l_data", "h_w", "infeasible_steps"]
 
 
-def _kw(d):
-    """d-adaptive shared kwargs."""
-    kw = shared_kwargs(d)
-    return kw
+# ===========================================================================
+# Helpers
+# ===========================================================================
+def _run_config(X, denoiser, step_type, project, kw):
+    """
+    Run one configuration and return (W_np, infeasible_count).
+    infeasible_count = number of gradient steps that left W_s.
+    Barrier-aware is 0 by Lemma 1.
+    """
+    if step_type == "fixed":
+        W, hist = dag_pnp_fixed_step(
+            X, denoiser,
+            fixed_eta=kw["eta"],
+            project=project,
+            **kw,
+        )
+        infeasible = int(sum(hist["infeasible_steps"]))
+    else:  # barrier
+        W, _ = dag_pnp(X, denoiser, verbose=False, project=project, **kw)
+        infeasible = 0   # guaranteed by Lemma 1
+
+    return W.detach().numpy(), infeasible
 
 
-def _write_rows_csv(path: str, fieldnames: List[str], rows: List[Dict]):
+def _eval(W_np, W_true, X, s):
+    """Compute all metrics for a single estimate."""
+    dag_metrics = evaluate_dag(W_np, W_true, get_threshold(W_np))
+    W_t = torch.tensor(W_np, dtype=X.dtype, device=X.device)
+    l_data = data_loss(X, W_t).item()
+    h_w    = dagma_penalty(W_t, s).item()   # inf if outside feasible set
+    return {
+        "shd":    dag_metrics["shd"],
+        "f1":     dag_metrics["f1"],
+        "l_data": l_data,
+        "h_w":    h_w if np.isfinite(h_w) else float("nan"),
+    }
+
+
+def _write_csv(path, fieldnames, rows):
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
 
-# ===========================================================================
-# Step 1: collect convergence histories (panels 1 & 2)
-# ===========================================================================
-def collect_convergence(save_dir: str) -> Dict[str, Dict]:
-    print(f"\n── Collecting convergence data (panels 1 & 2, d={D_CONV}) ──")
+def _print_table(summary, d):
+    """Print a formatted mean ± std table for one graph size."""
+    col_w  = 18
+    headers = ["SHD ↓", "F1 ↑", "L_data ↓", "h(W) ↓", "Infeas. steps ↓"]
+    keys    = ["shd", "f1", "l_data", "h_w", "infeasible_steps"]
+    header  = f"{'Configuration':<24}" + "".join(f"{h:>{col_w}}" for h in headers)
+    sep     = "─" * len(header)
 
+    print(f"\n{sep}")
+    print(f"  d = {d}   n = {N_SAMPLES}   seeds = {NUM_SEEDS}")
+    print(sep)
+    print(header)
+    print(sep)
+
+    for label, _, _ in CONFIGS:
+        row_str = f"{label:<24}"
+        for k in keys:
+            mean, std = summary[label][k]
+            row_str += f"  {mean:>6.3f} ± {std:<7.3f}"
+        print(row_str)
+
+    print(sep + "\n")
+
+
+def _latex_table(all_summary):
+    """Return a LaTeX tabular string covering all d values."""
+    keys    = ["shd", "f1", "l_data", "h_w", "infeasible_steps"]
+    headers = ["SHD $\\downarrow$", "F1 $\\uparrow$",
+               "$L_{\\text{data}}$ $\\downarrow$",
+               "$h(W)$ $\\downarrow$",
+               "Infeas. steps $\\downarrow$"]
+
+    lines = [
+        r"\begin{tabular}{ll" + "r" * len(keys) + "}",
+        r"\toprule",
+        r"$d$ & Configuration & " + " & ".join(headers) + r" \\",
+        r"\midrule",
+    ]
+    for d, summary in sorted(all_summary.items()):
+        lines.append(r"\multicolumn{" + str(2 + len(keys)) + r"}{l}{"
+                     + f"$d = {d}$" + r"} \\")
+        for label, _, _ in CONFIGS:
+            cells = []
+            for k in keys:
+                mean, std = summary[label][k]
+                if np.isnan(mean):
+                    cells.append("---")
+                else:
+                    cells.append(f"{mean:.3f} $\\pm$ {std:.3f}")
+            lines.append(f"  & {label} & " + " & ".join(cells) + r" \\")
+        lines.append(r"\midrule")
+
+    lines[-1] = r"\bottomrule"
+    lines.append(r"\end{tabular}")
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# Main experiment
+# ===========================================================================
+def run_experiment2(save_dir: str = "results", normalise: bool = NORMALISE):  # False overrides NORMALISE: barrier must stay active
+    """
+    normalise=False (default): run on raw X so that the barrier mechanism is
+    visibly active.  Set normalise=True to compare with the normalised setting
+    (note: normalisation shrinks W*, keeping it away from the feasible
+    boundary, so the barrier-aware and fixed-step methods become identical).
+    """
+    os.makedirs(save_dir, exist_ok=True)
     denoiser = IdentityDenoiser()
-    kw = _kw(D_CONV)
-    print(f"  d={D_CONV}  s={kw['s']:.2f}  W_max={kw['W_max']:.2f}")
 
-    W_true = random_dag(D_CONV, k=K_EDGES, weight_low=WEIGHT_LOW,
-                        weight_high=WEIGHT_HIGH, seed=SEED_CONV)
-    # To use SF ground truth instead, uncomment the next line and comment out above.
-    # W_true = scale_free_dag(D_CONV, m=SF_M, weight_low=WEIGHT_LOW,
-    #                         weight_high=WEIGHT_HIGH, seed=SEED_CONV)
-    X_np = sample_sem(W_true, N_CONV, seed=SEED_CONV + 1)
-    X    = to_tensor(X_np)
+    rows_raw: List[Dict] = []
+    all_summary: Dict[int, Dict] = {}
 
-    _, hist_barrier = dag_pnp(X, denoiser, verbose=False, **kw)
-    _, hist_fixed   = dag_pnp_fixed_step(X, denoiser, fixed_eta=kw["eta"], **kw)
+    for d in D_VALUES:
+        kw = shared_kwargs(d)
+        s  = kw["s"]
+        print(f"\n{'='*65}")
+        print(f"  Experiment 2   d={d}   n={N_SAMPLES}   seeds={NUM_SEEDS}  "
+              f"normalise={normalise}")
+        print(f"  s={s:.2f}  W_max={kw['W_max']:.2f}  eta={kw['eta']}")
+        print(f"{'='*65}")
 
-    histories = {"barrier": hist_barrier, "fixed": hist_fixed}
-
-    for name, hist in [("Barrier-aware", hist_barrier), ("Fixed step", hist_fixed)]:
-        n_inf = sum(hist.get("infeasible_steps", [False] * kw["num_iters"]))
-        print(f"    {name:<20}  loss={hist['loss'][-1]:.5f}  "
-              f"h(W)={hist['h'][-1]:.5f}  infeasible={n_inf}")
-
-    rows = []
-    for variant, hist in [("barrier", hist_barrier), ("fixed", hist_fixed)]:
-        infeas = hist.get("infeasible_steps", [False] * len(hist["loss"]))
-        for it in range(len(hist["loss"])):
-            rows.append({
-                "d": D_CONV, "variant": variant, "iteration": it,
-                "loss": hist["loss"][it], "h": hist["h"][it],
-                "sigma": hist["sigma"][it], "gamma": hist["gamma"][it],
-                "infeasible_step": int(infeas[it]),
-            })
-
-    csv_path = os.path.join(save_dir, "exp2_convergence.csv")
-    _write_rows_csv(
-        csv_path,
-        ["d", "variant", "iteration", "loss", "h", "sigma", "gamma", "infeasible_step"],
-        rows,
-    )
-    print(f"\n  Saved → {csv_path}")
-    return histories
-
-
-# ===========================================================================
-# Step 2: collect feasibility violation counts (panel 3)
-# ===========================================================================
-def collect_feasibility(save_dir: str) -> Dict[str, Dict]:
-    print("\n── Collecting feasibility data (panel 3) ──")
-    print(f"  {'d':>5}  {'Barrier (avg)':>15}  {'Fixed (avg)':>13}")
-    print("  " + "─" * 38)
-
-    # Each entry: {"mean": [per-d means], "std": [per-d stds]}
-    infeasible: Dict[str, Dict[str, List[float]]] = {
-        "barrier": {"mean": [], "std": []},
-        "fixed":   {"mean": [], "std": []},
-    }
-    denoiser = IdentityDenoiser()
-    rows = []
-
-    for d in D_FEASIBILITY:
-        kw = _kw(d)
-        barrier_viols, fixed_viols = [], []
+        # raw[label][metric] = list of values across seeds
+        raw: Dict[str, Dict[str, List]] = {
+            label: defaultdict(list) for label, _, _ in CONFIGS
+        }
 
         for seed in range(NUM_SEEDS):
+            rng    = seed * 100
             W_true = random_dag(d, k=K_EDGES, weight_low=WEIGHT_LOW,
-                                weight_high=WEIGHT_HIGH, seed=seed * 100)
-            # To use SF ground truth instead, uncomment the next line and comment out random_dag(...) above.
+                                weight_high=WEIGHT_HIGH, seed=rng)
+            # To use SF instead, comment out above and uncomment:
             # W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
-            #                         weight_high=WEIGHT_HIGH, seed=seed * 100)
-            X_np = sample_sem(W_true, N_FEASIBILITY, seed=seed * 100 + 1)
-            X = to_tensor(X_np)
+            #                         weight_high=WEIGHT_HIGH, seed=rng)
+            X_np = sample_sem(W_true, N_SAMPLES, seed=rng + 1)
+            X    = to_tensor(X_np)
 
-            # Barrier-aware: 0 violations guaranteed by Lemma 1
-            barrier_viols.append(0)
-            rows.append({"d": d, "seed": seed, "variant": "barrier",
-                         "infeasible_steps": 0})
+            if normalise:
+                from data_utils import normalise_X, denormalise_W
+                X_run, denorm = normalise_X(X)
+            else:
+                X_run  = X
+                denorm = None
 
-            # Fixed step: count actual violations
-            _, hist_f = dag_pnp_fixed_step(X, denoiser, fixed_eta=kw["eta"], **kw)
-            n_viol = sum(hist_f["infeasible_steps"])
-            fixed_viols.append(n_viol)
-            rows.append({"d": d, "seed": seed, "variant": "fixed",
-                         "infeasible_steps": n_viol})
+            for label, step_type, project in CONFIGS:
+                W_norm, n_infeas = _run_config(X_run, denoiser, step_type, project, kw)
+                W_np = (denormalise_W(W_norm, denorm)
+                        if normalise else W_norm)
+                m = _eval(W_np, W_true, X, s)
+                m["infeasible_steps"] = n_infeas
 
-        infeasible["barrier"]["mean"].append(float(np.mean(barrier_viols)))
-        infeasible["barrier"]["std"].append(float(np.std(barrier_viols)))
-        infeasible["fixed"]["mean"].append(float(np.mean(fixed_viols)))
-        infeasible["fixed"]["std"].append(float(np.std(fixed_viols)))
-        print(f"  d={d:>3}  "
-              f"{infeasible['barrier']['mean'][-1]:>15.1f} ± {infeasible['barrier']['std'][-1]:.1f}  "
-              f"{infeasible['fixed']['mean'][-1]:>13.1f} ± {infeasible['fixed']['std'][-1]:.1f}")
+                for k_metric, v in m.items():
+                    raw[label][k_metric].append(v)
 
-    csv_path = os.path.join(save_dir, "exp2_feasibility.csv")
-    _write_rows_csv(csv_path, ["d", "seed", "variant", "infeasible_steps"], rows)
-    print(f"  Saved → {csv_path}")
+                rows_raw.append({
+                    "d": d, "config": label, "seed": seed,
+                    **{k_metric: v for k_metric, v in m.items()},
+                })
 
-    return infeasible
+            if (seed + 1) % 2 == 0:
+                print(f"  seed {seed + 1}/{NUM_SEEDS} done")
 
+        # Summarise
+        summary = {
+            label: {
+                metric: (
+                    float(np.nanmean(vals)),
+                    float(np.nanstd(vals)),
+                )
+                for metric, vals in mdict.items()
+            }
+            for label, mdict in raw.items()
+        }
+        all_summary[d] = summary
+        _print_table(summary, d)
 
-# ===========================================================================
-# Entry point
-# ===========================================================================
-def run_experiment2(save_dir: str = "results"):
-    os.makedirs(save_dir, exist_ok=True)
-    histories         = collect_convergence(save_dir)
-    infeasible_counts = collect_feasibility(save_dir)
-    plot_experiment2(
-        histories=histories,
-        infeasible_counts=infeasible_counts,
-        d_values=D_FEASIBILITY,
-        num_iters=NUM_ITERS,
-        save_path=os.path.join(save_dir, "exp2.png"),
+    # ---- Save per-seed CSV ----
+    raw_path = os.path.join(save_dir, "exp2_results.csv")
+    _write_csv(
+        raw_path,
+        ["d", "config", "seed", "shd", "f1", "l_data", "h_w", "infeasible_steps"],
+        rows_raw,
     )
+    print(f"  Raw results  → {raw_path}")
+
+    # ---- Save summary CSV ----
+    rows_summary = []
+    for d, summary in sorted(all_summary.items()):
+        for label, _, _ in CONFIGS:
+            row = {"d": d, "config": label}
+            for metric in METRICS:
+                mean, std = summary[label][metric]
+                row[f"{metric}_mean"] = round(mean, 5)
+                row[f"{metric}_std"]  = round(std, 5)
+            rows_summary.append(row)
+
+    summary_cols = ["d", "config"] + [
+        f"{m}_{s}" for m in METRICS for s in ("mean", "std")
+    ]
+    summary_path = os.path.join(save_dir, "exp2_summary.csv")
+    _write_csv(summary_path, summary_cols, rows_summary)
+    print(f"  Summary      → {summary_path}")
+
+    # ---- Save LaTeX ----
+    tex_path = os.path.join(save_dir, "exp2_summary.tex")
+    with open(tex_path, "w") as f:
+        f.write(_latex_table(all_summary))
+    print(f"  LaTeX table  → {tex_path}")
 
 
 if __name__ == "__main__":

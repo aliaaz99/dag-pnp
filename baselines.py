@@ -19,8 +19,8 @@ from dag_pnp import (
     dag_pnp, IdentityDenoiser,
     _noise_schedule, _project_onto_K,
 )
-from losses import grad_lext, data_loss, dagma_penalty
-
+from losses_dag import grad_lext, data_loss, dagma_penalty
+from dag_config import THRESHOLD
 
 
 # ===========================================================================
@@ -54,6 +54,7 @@ def notears_baseline(
     lr:          float = 0.001,
     W_max:       float = 10.0,   # increased from 3.0; prevents over-clipping at d>=20
     grad_clip:   float = 10.0,
+    W_init:      Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict]:
     """
     Simplified NOTEARS via gradient descent with numerical safeguards.
@@ -70,7 +71,8 @@ def notears_baseline(
     """
     X_np = X.numpy() if isinstance(X, torch.Tensor) else np.array(X)
     n, d = X_np.shape
-    W    = np.zeros((d, d))
+    W    = np.zeros((d, d)) if W_init is None else W_init.copy()
+    np.fill_diagonal(W, 0.0)
     history: Dict = {"loss": [], "h": []}
 
     for _ in range(num_iters):
@@ -111,7 +113,7 @@ def dagma_baseline(
     Equivalent to passing IdentityDenoiser to dag_pnp.
     All keyword arguments are forwarded to dag_pnp.
     """
-    W_est, history = dag_pnp(X, IdentityDenoiser(), verbose=False, **kwargs)
+    W_est, history = dag_pnp(X, IdentityDenoiser(), inject_noise=False, verbose=True, **kwargs)
     return W_est.detach().numpy(), history
 
 
@@ -295,6 +297,7 @@ def dag_pnp_fixed_step(
     eta:         float = 0.005,
     c:           float = 0.3,
     epsilon:     float = 1e-6,
+    project:     bool  = True,
     W_init: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict]:
     """
@@ -339,7 +342,7 @@ def dag_pnp_fixed_step(
         sigma_prev = sigma_k
 
         W_tilde = denoiser(z, sigma_k)
-        W       = _project_onto_K(W_tilde, s, delta_min, W_max)
+        W = _project_onto_K(W_tilde, s, delta_min, W_max) if project else W_tilde.clone()
 
         history["loss"].append(data_loss(X, W).item())
         history["h"].append(dagma_penalty(W, s).item())
@@ -375,6 +378,8 @@ def dag_pnp_fixed_sigma(
     sigma_max:   float = 0.5,
     smooth_beta: float = 0.9,
     W_init: Optional[torch.Tensor] = None,
+    verbose:   bool = True,
+    log_every: int  = 20,
 ) -> Tuple[torch.Tensor, Dict]:
     """
     DAG-PnP with a constant denoiser noise level (no residual-based schedule).
@@ -402,18 +407,33 @@ def dag_pnp_fixed_sigma(
 
     history: Dict = {"loss": [], "h": [], "sigma": [], "gamma": []}
 
-    for _ in range(num_iters):
+    for k in range(num_iters):
         grad  = grad_lext(X, W, lambda_data, lambda_dag, s)
         gamma = _barrier_step_size(W, grad, s, eta, c, epsilon)
         z     = W - gamma * grad
 
         # Fixed noise level — skip eq. (12)
-        W_tilde = denoiser(z, fixed_sigma)
-        W       = _project_onto_K(W_tilde, s, delta_min, W_max)
+        # _alpha_k = 1 - fixed_sigma
+        # _eps      = torch.randn_like(z)
+        # z_noisy   = _alpha_k * z + (fixed_sigma) * _eps
+        # W_tilde = denoiser(z_noisy, fixed_sigma)
+        # W       = _project_onto_K(W_tilde, s, delta_min, W_max)
+
+
+        z_binary  = (z.abs() > THRESHOLD).float() * z.sign()
+        # z_noisy   = _alpha_k * z_binary + sigma_k * _eps
+        W_struct  = denoiser(z_binary, fixed_sigma)   
+        # Use denoiser output only as structural mask, keep gradient's weights
+        W_tilde   = W_struct.sign() * z.abs()   # denoiser decides edges, gradient decides magnitudes
 
         history["loss"].append(data_loss(X, W).item())
         history["h"].append(dagma_penalty(W, s).item())
         history["sigma"].append(fixed_sigma)
         history["gamma"].append(gamma)
+        if verbose and (k % log_every == 0 or k == num_iters - 1):
+            print(f"Iter {k+1}/{num_iters}  loss={history['loss'][-1]:.4f}  "
+                  f"h={history['h'][-1]:.4f}  sigma={fixed_sigma:.4f}  "
+                  f"gamma={gamma:.6f}")
+            
 
     return W, history

@@ -42,10 +42,36 @@ larger weights, increase s proportionally.
 import numpy as np
 
 # ── data generation ──────────────────────────────────────────────────────────
-WEIGHT_LOW  = 0.5
-WEIGHT_HIGH = 1.0
+WEIGHT_LOW  = 0.2
+WEIGHT_HIGH = 0.5
 K_EDGES     = 4     # edges per node: ER4/SF4 (DAGMA paper default); use 2 or 6 for ER2/SF2 or ER6/SF6
-THRESHOLD   = 0.3
+THRESHOLD   = 0.2  # used when ADAPTIVE_THRESHOLD = False; default = WEIGHT_LOW / 2
+
+# ── threshold selection ───────────────────────────────────────────────────────
+# True  : threshold = mean of all off-diagonal |W[i,j]| in the estimated matrix.
+ADAPTIVE_THRESHOLD = False
+
+
+def get_threshold(W_np=None) -> float:
+    """
+    Return the edge-detection threshold for a given estimated weight matrix.
+
+    If ADAPTIVE_THRESHOLD is True and W_np is provided, returns the mean of
+    all off-diagonal absolute values — a data-driven split between near-zero
+    spurious entries and true edges.
+
+    If ADAPTIVE_THRESHOLD is False (or W_np is None), returns the fixed
+    THRESHOLD constant.
+    """
+    if ADAPTIVE_THRESHOLD and W_np is not None:
+        d = W_np.shape[0]
+        mask = ~np.eye(d, dtype=bool)          # exclude diagonal (always 0)
+        return float(np.abs(W_np[mask]).mean())
+    return THRESHOLD
+
+# ── normalisation ─────────────────────────────────────────────────────────────
+# True  : divide X by per-column std before optimisation, recover original-scale W
+NORMALISE   = False
 
 # ── fixed hyperparameters (same for all d) ───────────────────────────────────
 LAMBDA_DATA = 1.0
@@ -54,8 +80,8 @@ ETA         = 0.005
 C           = 0.3
 EPSILON     = 1e-6
 ALPHA       = 1.0
-SIGMA_MIN   = 0.01
-SIGMA_MAX   = 0.5
+SIGMA_MIN   = 0.0
+SIGMA_MAX   = 1.0
 SMOOTH_BETA = 0.0
 DELTA_MIN   = 1e-6
 NUM_ITERS   = 1000   

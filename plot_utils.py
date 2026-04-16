@@ -74,8 +74,9 @@ def print_results_table(
     labels = {
         "shd":        "SHD ↓",
         "acyclicity": "h(W) ↓",
-        "fit_error":  "Fit err ↓",
-        "f1":         "F1 ↑",
+        "fit_error":       "Fit err ↓",
+        "fit_error_ratio": "Fit ratio ↓",
+        "f1":              "F1 ↑",
         "tpr":        "TPR ↑",
         "fdr":        "FDR ↓",
     }
@@ -120,8 +121,10 @@ def plot_experiment2(
 
     Parameters
     ----------
-    histories         : {"barrier": history_dict, "fixed": history_dict}
-                        history from a single fixed d (e.g. d=50)
+    histories         : {"barrier": hist, "fixed": hist}
+                        Each hist has keys "loss", "loss_std", "h", "h_std"
+                        containing arrays averaged over seeds (with inf→nan
+                        handling so fixed-step divergence shows as a line break).
     infeasible_counts : {"barrier": {"mean": [...], "std": [...]},
                          "fixed":   {"mean": [...], "std": [...]}}
                         averaged over seeds, one entry per element of d_values
@@ -132,22 +135,33 @@ def plot_experiment2(
     ax_loss, ax_h, ax_bar = axes
 
     for key, hist in histories.items():
-        s = STYLE.get(key, {"color": "gray", "linestyle": "-", "label": key})
-        ax_loss.plot(range(len(hist["loss"])), hist["loss"],
+        s         = STYLE.get(key, {"color": "gray", "linestyle": "-", "label": key})
+        iters     = np.arange(len(hist["loss"]))
+        mean_loss = np.array(hist["loss"],     dtype=float)
+        std_loss  = np.array(hist["loss_std"], dtype=float)
+        mean_h    = np.array(hist["h"],        dtype=float)
+        std_h     = np.array(hist["h_std"],    dtype=float)
+
+        ax_loss.plot(iters, mean_loss,
                      color=s["color"], linestyle=s["linestyle"], linewidth=2.0,
                      label=s["label"])
-        ax_h.plot(range(len(hist["h"])), hist["h"],
+        ax_loss.fill_between(iters, mean_loss - std_loss, mean_loss + std_loss,
+                             color=s["color"], alpha=0.15)
+
+        ax_h.plot(iters, mean_h,
                   color=s["color"], linestyle=s["linestyle"], linewidth=2.0,
                   label=s["label"])
+        ax_h.fill_between(iters, mean_h - std_h, mean_h + std_h,
+                          color=s["color"], alpha=0.15)
 
-    ax_loss.set_title("Data fidelity loss")
+    ax_loss.set_title("Data fidelity loss (mean ± std)")
     ax_loss.set_xlabel("Iteration")
     ax_loss.set_ylabel(r"$\mathcal{L}_{\mathrm{data}}(W)$")
     ax_loss.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
     ax_loss.legend(fontsize=9)
     ax_loss.grid(True, alpha=0.3)
 
-    ax_h.set_title("Acyclicity penalty")
+    ax_h.set_title("Acyclicity penalty (mean ± std)")
     ax_h.set_xlabel("Iteration")
     ax_h.set_ylabel(r"$h(W)$")
     ax_h.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))

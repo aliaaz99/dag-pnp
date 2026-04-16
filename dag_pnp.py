@@ -15,8 +15,8 @@ import numpy as np
 import torch
 from typing import Callable, Dict, Optional, Tuple
 
-from losses import grad_lext, data_loss, dagma_penalty
-
+from losses_dag import grad_lext, data_loss, dagma_penalty
+from dag_config import THRESHOLD
 
 # ===========================================================================
 #  PLACEHOLDER DENOISER
@@ -81,7 +81,6 @@ class GaussianShrinkageDenoiser:
     def __call__(self, W: torch.Tensor, sigma: float) -> torch.Tensor:
         shrinkage = self.prior_std ** 2 / (self.prior_std ** 2 + sigma ** 2)
         return shrinkage * W.clone()
-    
 
 class GDSSDiffusionDenoiser:
     """
@@ -113,35 +112,19 @@ class GDSSDiffusionDenoiser:
 
     def __init__(self, model_adj, model_x, sde_adj, max_feat_num: int,
                  device, t_min: float = 1e-4):
+        import sys, os
+        _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
+        if _gdss_dir not in sys.path:
+            sys.path.insert(0, _gdss_dir)
+        from gdss.losses import get_score_fn  # gdss/losses.py
+
         self.model_adj    = model_adj
         self.model_x      = model_x
         self.sde          = sde_adj
         self.max_feat_num = max_feat_num
         self.device       = torch.device(device) if isinstance(device, str) else device
         self.t_min        = t_min
-        # Build score_fn inline — avoids importing gdss/losses.py which would
-        # collide with the top-level losses.py already in sys.modules.
-        self.score_fn     = self._make_score_fn(sde_adj, model_adj)
-
-    @staticmethod
-    def _make_score_fn(sde, model):
-        """
-        Equivalent to gdss get_score_fn(sde, model, train=False, continuous=True)
-        for VP-SDE, inlined to avoid the losses.py module-name collision.
-        Returns score = -ε_pred / std  (i.e. ∇ log p_t).
-        """
-        model.eval()
-        _m = model.module if hasattr(model, 'module') else model
-        _takes_time = getattr(_m, 'takes_time', False)
-
-        def score_fn(x, adj, flags, t):
-            with torch.no_grad():
-                out = model(x, adj, flags, t=t) if _takes_time else model(x, adj, flags)
-            # marginal_prob(zeros, t)[1] gives std without touching x
-            std = sde.marginal_prob(torch.zeros_like(adj), t)[1]
-            return -out / std[:, None, None]
-
-        return score_fn
+        self.score_fn     = get_score_fn(sde_adj, model_adj, train=False, continuous=True)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -163,47 +146,13 @@ class GDSSDiffusionDenoiser:
         _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
         if _gdss_dir not in sys.path:
             sys.path.insert(0, _gdss_dir)
+        from gdss.utils.loader import load_model_from_ckpt, load_sde
 
-        # Import only sde.py and model files — neither depends on losses.py,
-        # so there is no collision with the top-level losses.py.
-        from sde import VPSDE, VESDE, subVPSDE
-        from models.ScoreNetwork_A import ScoreNetworkA
-        from models.ScoreNetwork_X import ScoreNetworkX, ScoreNetworkX_GMH
-        from models.ScoreNetwork_Transformer import (ScoreNetworkA_Transformer,
-                                                     ScoreNetworkX_Transformer)
-
-        _constructors = {
-            'ScoreNetworkX':             ScoreNetworkX,
-            'ScoreNetworkX_GMH':         ScoreNetworkX_GMH,
-            'ScoreNetworkA':             ScoreNetworkA,
-            'ScoreNetworkA_Transformer': ScoreNetworkA_Transformer,
-            'ScoreNetworkX_Transformer': ScoreNetworkX_Transformer,
-        }
-
-        def _load_model(params, state_dict):
-            p = params.copy()
-            model_type = p.pop('model_type')
-            model = _constructors[model_type](**p)
-            if state_dict and 'module.' in list(state_dict.keys())[0]:
-                state_dict = {k[7:]: v for k, v in state_dict.items()}
-            model.load_state_dict(state_dict)
-            return model.to(device)
-
-        def _load_sde(cfg):
-            if cfg.type == 'VP':
-                return VPSDE(beta_min=cfg.beta_min, beta_max=cfg.beta_max, N=cfg.num_scales)
-            elif cfg.type == 'VE':
-                return VESDE(sigma_min=cfg.beta_min, sigma_max=cfg.beta_max, N=cfg.num_scales)
-            elif cfg.type == 'subVP':
-                from sde import subVPSDE
-                return subVPSDE(beta_min=cfg.beta_min, beta_max=cfg.beta_max, N=cfg.num_scales)
-            raise NotImplementedError(f'SDE type {cfg.type}')
-
-        ckpt      = torch.load(ckpt_path, map_location=device)
-        cfg       = ckpt['model_config']
-        model_adj = _load_model(ckpt['params_adj'], ckpt['adj_state_dict'])
-        model_x   = _load_model(ckpt['params_x'],   ckpt['x_state_dict'])
-        sde_adj   = _load_sde(cfg.sde.adj)
+        ckpt       = torch.load(ckpt_path, map_location=device)
+        cfg        = ckpt['model_config']
+        model_adj  = load_model_from_ckpt(ckpt['params_adj'], ckpt['adj_state_dict'], device)
+        model_x    = load_model_from_ckpt(ckpt['params_x'],   ckpt['x_state_dict'],   device)
+        sde_adj    = load_sde(cfg.sde.adj)
 
         return cls(model_adj, model_x, sde_adj, cfg.data.max_feat_num, device, t_min)
 
@@ -226,12 +175,16 @@ class GDSSDiffusionDenoiser:
     @torch.no_grad()
     def __call__(self, W: torch.Tensor, sigma: float) -> torch.Tensor:
         """
-        Tweedie denoising at noise level sigma.
+        Apply VP-SDE forward noise then Tweedie denoising at noise level sigma.
+
+        Receives a clean W (the gradient-step output z), injects VP-SDE forward
+        noise using the SDE's exact marginal_prob, and returns the posterior-mean
+        denoised estimate via Tweedie's formula.
 
         Args
         ----
-        W     : (d, d) noisy adjacency matrix  (current PnP iterate)
-        sigma : noise level used to select diffusion time t via std(t)=sigma
+        W     : (d, d) clean adjacency matrix  (current PnP iterate after grad step)
+        sigma : target noise std; used to find diffusion time t via std(t) = sigma
         Returns
         -------
         (d, d) posterior-mean denoised adjacency estimate
@@ -243,16 +196,22 @@ class GDSSDiffusionDenoiser:
         t     = torch.tensor([t_val], device=self.device, dtype=torch.float32)
 
         # ---- prepare batched inputs  ----------------------------------
-        adj_t = W.unsqueeze(0).to(device=self.device, dtype=torch.float32)  # (1,d,d)
+        adj_0 = W.unsqueeze(0).to(device=self.device, dtype=torch.float32)  # (1,d,d)
         x     = torch.ones(1, d, self.max_feat_num, device=self.device)
         flags = torch.ones(1, d, device=self.device)
 
-        # ---- VP-SDE marginal at t  ------------------------------------
-        #   marginal_prob(x, t) returns (mean_coeff·x, std)
-        #   Passing ones gives mean_coeff directly; no need to recompute
-        #   log_mean_coeff manually from beta_0/beta_1.
-        ones = torch.ones_like(adj_t)
-        mean_c, std_t = self.sde.marginal_prob(ones, t)  # mean_c:(1,d,d), std_t:(1,)
+        # ---- VP-SDE exact forward noise  ------------------------------
+        #   adj_t = mean_coeff(t) * adj_0 + std(t) * eps
+        mean_x, std_t = self.sde.marginal_prob(adj_0, t)      # mean_x:(1,d,d), std_t:(1,)
+        eps   = torch.randn_like(adj_0)
+        adj_t = mean_x + std_t.view(-1, 1, 1) * eps           # (1, d, d)
+
+        # ---- mean_coeff for Tweedie denominator  ---------------------
+        log_mean_coeff = (
+            -0.25 * t ** 2 * (self.sde.beta_1 - self.sde.beta_0)
+            - 0.5  * t      *  self.sde.beta_0
+        )
+        mean_coeff_t = torch.exp(log_mean_coeff)               # (1,)
 
         # ---- score  ∇_{adj_t} log p_t(adj_t)  ------------------------
         #   get_score_fn returns:  score = -ε_pred / std
@@ -261,12 +220,12 @@ class GDSSDiffusionDenoiser:
         # ---- Tweedie's formula  --------------------------------------
         #   adj_hat0 = ( adj_t + std² · score ) / mean_coeff
         #            = ( adj_t − std · ε_pred ) / mean_coeff
-        std_sq   = (std_t ** 2).view(1, 1, 1)
+        std_sq   = (std_t        ** 2).view(1, 1, 1)
+        mean_c   =  mean_coeff_t      .view(1, 1, 1)
         adj_hat0 = (adj_t + std_sq * score) / mean_c           # (1, d, d)
 
         return adj_hat0.squeeze(0).cpu()
-
-
+    
 
 # ===========================================================================
 #  STEP-SIZE RULE  (eq. 11 / Section III-C)
@@ -308,6 +267,7 @@ def _barrier_step_size(
     delta = torch.linalg.svdvals(M).min().item()
     grad_norm = torch.norm(grad, "fro").item()
     barrier = c * delta / (grad_norm + epsilon)
+    # print("c=",c,"delta=",delta,"grad_norm=",grad_norm,"epsilon=",epsilon,"kasr=",delta / (grad_norm + epsilon))
     return float(min(eta, barrier))
 
 
@@ -351,6 +311,35 @@ def _noise_schedule(
     if sigma_prev is not None and smooth_beta > 0.0:
         sigma = smooth_beta * sigma_prev + (1.0 - smooth_beta) * sigma
     return sigma
+
+
+def _linear_noise_schedule(
+    k: int,
+    num_iters: int,
+    sigma_min: float,
+    sigma_max: float,
+) -> float:
+    """
+    Linear (vanilla) noise schedule: sigma decreases linearly from sigma_max
+    to sigma_min over the course of the optimisation, independent of the data.
+
+        sigma_k = sigma_max - (sigma_max - sigma_min) * k / (num_iters - 1)
+
+    At k=0            : sigma = sigma_max  (strong denoising early)
+    At k=num_iters-1  : sigma = sigma_min  (light denoising near convergence)
+
+    Args:
+        k:          current iteration index (0-based)
+        num_iters:  total number of iterations
+        sigma_min:  noise level at the final iteration
+        sigma_max:  noise level at the first iteration
+    Returns:
+        Scalar sigma (float).
+    """
+    if num_iters <= 1:
+        return sigma_min
+    t = k / (num_iters - 1)          # progress in [0, 1]
+    return float(sigma_max - (sigma_max - sigma_min) * t)
 
 
 # ===========================================================================
@@ -436,6 +425,13 @@ def dag_pnp(
     delta_min: float = 1e-6,
     # Initialization
     W_init: Optional[torch.Tensor] = None,
+    # Projection
+    project: bool = True,
+    # Noise injection before denoiser (set False for IdentityDenoiser / DAGMA)
+    inject_noise: bool = True,
+    # Mixing weight for denoiser output: W_tilde = (1-denoiser_weight)*z + denoiser_weight*W_struct
+    # 0.0 = pure gradient descent (ignore denoiser), 1.0 = pure denoiser output
+    denoiser_weight: float = 0.0,
     # Logging
     verbose:   bool = True,
     log_every: int  = 20,
@@ -520,17 +516,27 @@ def dag_pnp(
         z = W - gamma * grad
 
         # ---- Step 4: noise schedule  (eq. 12) ----
+        # Residual-based schedule (default): sigma ∝ normalised data residual.
         sigma_k = _noise_schedule(
             X, W, alpha, sigma_min, sigma_max, sigma_prev, smooth_beta
         )
         sigma_prev = sigma_k
+        # Linear schedule (vanilla): sigma decreases linearly, data-independent.
+        # sigma_k = _linear_noise_schedule(k, num_iters, sigma_min, sigma_max)
 
         # ---- Step 5: denoising step  (eq. 7) ----
-        # D_{sigma_k}(z) — replace IdentityDenoiser with your model
-        W_tilde = denoiser(z, sigma_k)
+        if inject_noise:
+            # GDSSDiffusionDenoiser injects VP-SDE forward noise internally, then
+            # returns the Tweedie posterior-mean estimate from clean z.
+            # z_binary = (z.abs() > THRESHOLD).float() * z.sign()
+            W_struct = denoiser(z, sigma_k)
+            W_tilde  = W_struct
+        else:
+            # DAGMA / identity denoiser: pure gradient descent, no structural prior.
+            W_tilde = z
 
         # ---- Step 6: projection step  (eq. 8) ----
-        W = _project_onto_K(W_tilde, s, delta_min, W_max)
+        W = _project_onto_K(W_tilde, s, delta_min, W_max) if project else W_tilde
 
         # ---- Logging ----
         loss_val = data_loss(X, W).item()

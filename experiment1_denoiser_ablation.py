@@ -19,43 +19,57 @@ import torch
 from collections import defaultdict
 from typing import Dict
 
-from data_utils import random_dag, sample_sem, evaluate_dag, to_tensor, scale_free_dag
-from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser
+from data_utils import (random_dag, sample_sem, evaluate_dag, to_tensor,
+                        scale_free_dag, normalise_X, denormalise_W)
+from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser, GDSSDiffusionDenoiser
 from baselines import dagma_baseline, notears_baseline, graph_gen_baseline
-from losses import data_loss, dagma_penalty
+from losses_dag import data_loss, dagma_penalty
 from plot_utils import print_results_table
-from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, THRESHOLD
+from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, NORMALISE, get_threshold
 
 
 # ===========================================================================
 # !! PLUG IN YOUR DENOISER HERE !!
 # ===========================================================================
-def get_denoiser():
-    # prior_std = midpoint of [WEIGHT_LOW, WEIGHT_HIGH] = (0.5 + 1.0) / 2
-    return IdentityDenoiser()  # <-- ablation: no denoising
-    # return GaussianShrinkageDenoiser(prior_std=0.75)  # <-- replace with real denoiser
+# def get_denoiser():
+#     # prior_std = midpoint of [WEIGHT_LOW, WEIGHT_HIGH] = (0.5 + 1.0) / 2
+#     return IdentityDenoiser()  # <-- ablation: no denoising
+#     # return GaussianShrinkageDenoiser(prior_std=0.75)  # <-- replace with real denoiser
 
+def get_denoiser():
+    return GDSSDiffusionDenoiser.from_checkpoint(
+        ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth",
+        device="cpu",   # or "cuda:0" if you have a GPU
+    )
 
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_VALUES  = [20, 50]
+D_VALUES  = [20]
 N_SAMPLES = 500
 SF_M      = K_EDGES
-NUM_SEEDS = 10
+NUM_SEEDS = 1
 
-METRICS = ["shd", "acyclicity", "fit_error", "f1"]
+METRICS = ["shd", "acyclicity", "fit_error", "fit_error_ratio", "f1"]
 
 
 # ===========================================================================
 # Helpers
 # ===========================================================================
-def _extra_metrics(W_np: np.ndarray, X: torch.Tensor, s: float) -> Dict:
+def _extra_metrics(W_np: np.ndarray, X: torch.Tensor, s: float,
+                   W_true_np: np.ndarray = None) -> Dict:
     W_t = torch.tensor(W_np, dtype=X.dtype, device=X.device)
-    return {
+    l_data = data_loss(X, W_t).item()
+    metrics = {
         "acyclicity": dagma_penalty(W_t, s).item(),
-        "fit_error":  data_loss(X, W_t).item(),
+        "fit_error":  l_data,
     }
+    if W_true_np is not None:
+        W_true_t = torch.tensor(W_true_np, dtype=X.dtype, device=X.device)
+        l_data_true = data_loss(X, W_true_t).item()
+        metrics["fit_error_ratio"] = (l_data / l_data_true
+                                      if l_data_true > 0 else float("nan"))
+    return metrics
 
 
 def _save_csv(raw: Dict, d: int, graph_family: str, save_dir: str):
@@ -77,7 +91,7 @@ def _save_csv(raw: Dict, d: int, graph_family: str, save_dir: str):
 # ===========================================================================
 # Main
 # ===========================================================================
-def run_one_setting(d, n, graph_family, denoiser, save_dir):
+def run_one_setting(d, n, graph_family, denoiser, save_dir, normalise=True):
     methods = ["NOTEARS", "DAGMA", "Greedy-BIC", "DAG-PnP"]
     raw: Dict = {m: defaultdict(list) for m in methods}
 
@@ -86,7 +100,8 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
     s  = kw["s"]
 
     print(f"\n  s={s:.2f}  W_max={kw['W_max']:.2f}  "
-          f"lambda_dag={kw['lambda_dag']}  num_iters={kw['num_iters']}")
+          f"lambda_dag={kw['lambda_dag']}  num_iters={kw['num_iters']}  "
+          f"normalise={normalise}")
 
     for seed in range(NUM_SEEDS):
         rng = seed * 1000
@@ -101,30 +116,39 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
         X_np = sample_sem(W_true, n, seed=rng + 1)
         X    = to_tensor(X_np)
 
-        def _record(method_name, W_est_np):
-            m = evaluate_dag(W_est_np, W_true, THRESHOLD)
-            m.update(_extra_metrics(W_est_np, X, s))
+        if normalise:
+            X_opt, denorm = normalise_X(X)
+        else:
+            X_opt  = X
+            denorm = np.ones((d, d), dtype=np.float32)
+
+        def _record(method_name, W_norm_np):
+            W_np = denormalise_W(W_norm_np, denorm)
+            m = evaluate_dag(W_np, W_true, get_threshold(W_np))
+            m.update(_extra_metrics(W_np, X, s, W_true_np=W_true))
             for k, v in m.items():
                 raw[method_name][k].append(v)
 
         # ---- NOTEARS ----
-        W_n, _ = notears_baseline(
-            X, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"], num_iters=kw["num_iters"], lr=0.001,
+        W_n_norm, _ = notears_baseline(
+            X_opt, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"],
+            num_iters=kw["num_iters"], lr=0.001,
             W_max=kw["W_max"], grad_clip=10.0,
         )
-        _record("NOTEARS", W_n)
+        _record("NOTEARS", W_n_norm)
 
         # ---- DAGMA ----
-        W_d, _ = dagma_baseline(X, **kw)
-        _record("DAGMA", W_d)
+        W_d_norm, _ = dagma_baseline(X_opt, **kw)
+        _record("DAGMA", W_d_norm)
 
         # ---- Greedy-BIC ----
-        W_g, _ = graph_gen_baseline(X, max_parents=min(5, d // 2))
-        _record("Greedy-BIC", W_g)
+        W_g, _ = graph_gen_baseline(X_opt, max_parents=min(5, d // 2))
+        _record("Greedy-BIC", W_g) # placeholder: reuse DAGMA
 
         # ---- DAG-PnP ----
-        # W_p, _ = dag_pnp(X, denoiser, verbose=False, **kw)
-        _record("DAG-PnP", W_d)
+        W_p, _ = dag_pnp(X_opt, denoiser, inject_noise=True, verbose=True, **kw)
+        _record("DAG-PnP", W_p.detach().numpy())
+        # _record("DAG-PnP", W_p)      # placeholder: reuse DAGMA
 
         if (seed + 1) % 2 == 0:
             print(f"    seed {seed+1}/{NUM_SEEDS} done")
@@ -143,16 +167,17 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir):
     print(f"  Raw results saved → {csv_path}\n")
 
 
-def run_experiment1(save_dir: str = "results"):
+def run_experiment1(save_dir: str = "results", normalise: bool = NORMALISE):
     os.makedirs(save_dir, exist_ok=True)
     denoiser = get_denoiser()
 
-    for graph_family in ["ER", "SF"]: # 
+    for graph_family in ["SF"]:
         for d in D_VALUES:
             print(f"\n{'='*60}")
             print(f"  {graph_family} graph   d={d}   n={N_SAMPLES}   seeds={NUM_SEEDS}")
             print(f"{'='*60}")
-            run_one_setting(d, N_SAMPLES, graph_family, denoiser, save_dir)
+            run_one_setting(d, N_SAMPLES, graph_family, denoiser, save_dir,
+                            normalise=normalise)
 
 
 if __name__ == "__main__":

@@ -211,3 +211,47 @@ def to_tensor(
     dtype=torch.float32,
 ) -> torch.Tensor:
     return torch.tensor(arr, device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# X normalisation / W denormalisation
+# ---------------------------------------------------------------------------
+
+def normalise_X(X: torch.Tensor):
+    """
+    Column-normalise X to unit variance for numerically stable optimisation.
+
+    High-variance graph topologies (long causal paths) produce X with large
+    per-column variance, which amplifies any weight error in L_data and can
+    cause gradient-based optimisers to diverge.  Normalising removes this
+    scale dependency from the optimisation landscape.
+
+    The corresponding true weights in normalised space are
+        W_norm*[i,j] = (σ_i / σ_j) * W*[i,j]
+    so the denormalisation to recover original-scale weights is
+        W_orig[i,j] = (σ_j / σ_i) * W_norm[i,j]
+    which is exactly `W_norm * denorm` element-wise.
+
+    Args:
+        X: (n, d) data tensor.
+    Returns:
+        X_opt:  (n, d) tensor with unit-variance columns  — pass to optimiser.
+        denorm: (d, d) numpy array; multiply W_norm element-wise to denormalise.
+    """
+    std_X  = X.std(dim=0).clamp(min=1e-8)                        # (d,)
+    X_opt  = X / std_X                                            # (n, d)
+    denorm = (std_X.unsqueeze(0) / std_X.unsqueeze(1)).numpy()   # (d, d)
+    return X_opt, denorm
+
+
+def denormalise_W(W_norm: np.ndarray, denorm: np.ndarray) -> np.ndarray:
+    """
+    Undo column normalisation: W_orig[i,j] = (σ_j / σ_i) * W_norm[i,j].
+
+    Args:
+        W_norm: (d, d) weight matrix estimated on column-normalised X.
+        denorm: (d, d) array returned by normalise_X.
+    Returns:
+        W_orig: (d, d) weight matrix on the original data scale.
+    """
+    return W_norm * denorm
