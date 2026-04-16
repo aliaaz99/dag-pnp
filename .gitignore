@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pth
 *.pkl
+!gdss/data/sem_SF_d20.pkl
 *.egg-info/
 .DS_Store
 logs_train/
