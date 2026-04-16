@@ -198,14 +198,11 @@ class GDSSDiffusionDenoiser:
         flags = torch.ones(1, d, device=self.device)
 
         # ---- VP-SDE marginal at t  ------------------------------------
-        #   p_t(adj_t | adj_0) = N( mean_coeff · adj_0,  std² · I )
-        dummy = torch.zeros_like(adj_t)
-        _, std_t = self.sde.marginal_prob(dummy, t)            # std_t: (1,)
-        log_mean_coeff = (
-            -0.25 * t ** 2 * (self.sde.beta_1 - self.sde.beta_0)
-            - 0.5  * t      *  self.sde.beta_0
-        )
-        mean_coeff_t = torch.exp(log_mean_coeff)               # (1,)
+        #   marginal_prob(x, t) returns (mean_coeff·x, std)
+        #   Passing ones gives mean_coeff directly; no need to recompute
+        #   log_mean_coeff manually from beta_0/beta_1.
+        ones = torch.ones_like(adj_t)
+        mean_c, std_t = self.sde.marginal_prob(ones, t)  # mean_c:(1,d,d), std_t:(1,)
 
         # ---- score  ∇_{adj_t} log p_t(adj_t)  ------------------------
         #   get_score_fn returns:  score = -ε_pred / std
@@ -214,8 +211,7 @@ class GDSSDiffusionDenoiser:
         # ---- Tweedie's formula  --------------------------------------
         #   adj_hat0 = ( adj_t + std² · score ) / mean_coeff
         #            = ( adj_t − std · ε_pred ) / mean_coeff
-        std_sq   = (std_t        ** 2).view(1, 1, 1)
-        mean_c   =  mean_coeff_t      .view(1, 1, 1)
+        std_sq   = (std_t ** 2).view(1, 1, 1)
         adj_hat0 = (adj_t + std_sq * score) / mean_c           # (1, d, d)
 
         return adj_hat0.squeeze(0).cpu()
