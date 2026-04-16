@@ -90,7 +90,8 @@ def assign_weights(B: np.ndarray) -> np.ndarray:
     n_edges = int(mask.sum())
     if n_edges == 0:
         return W
-    magnitudes = np.random.uniform(0.5, 2.0, size=n_edges)
+    # magnitudes = np.random.uniform(0.5, 2.0, size=n_edges)
+    magnitudes = np.random.uniform(0.2, 0.5, size=n_edges)
     signs = np.random.choice([-1.0, 1.0], size=n_edges)
     W[mask] = signs * magnitudes
     return W
@@ -212,7 +213,7 @@ def main():
 
     save_name = args.name if args.name else f"sem_{args.graph_type}_d{args.d}"
     os.makedirs(args.data_dir, exist_ok=True)
-    file_path = os.path.join(args.data_dir, save_name + ".pkl")
+    file_path = os.path.join(args.data_dir, save_name + "_low_weights" + ".pkl")
     with open(file_path, "wb") as f:
         pickle.dump(graphs, f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"\nSaved to {file_path}")
