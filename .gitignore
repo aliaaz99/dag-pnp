@@ -3,6 +3,7 @@ __pycache__/
 *.pth
 *.pkl
 !gdss/data/sem_SF_d20.pkl
+!gdss/checkpoints/*
 *.egg-info/
 .DS_Store
 logs_train/
