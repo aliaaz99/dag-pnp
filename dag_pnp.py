@@ -113,19 +113,35 @@ class GDSSDiffusionDenoiser:
 
     def __init__(self, model_adj, model_x, sde_adj, max_feat_num: int,
                  device, t_min: float = 1e-4):
-        import sys, os
-        _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
-        if _gdss_dir not in sys.path:
-            sys.path.insert(0, _gdss_dir)
-        from gdss.losses import get_score_fn  # gdss/losses.py
-
         self.model_adj    = model_adj
         self.model_x      = model_x
         self.sde          = sde_adj
         self.max_feat_num = max_feat_num
         self.device       = torch.device(device) if isinstance(device, str) else device
         self.t_min        = t_min
-        self.score_fn     = get_score_fn(sde_adj, model_adj, train=False, continuous=True)
+        # Build score_fn inline — avoids importing gdss/losses.py which would
+        # collide with the top-level losses.py already in sys.modules.
+        self.score_fn     = self._make_score_fn(sde_adj, model_adj)
+
+    @staticmethod
+    def _make_score_fn(sde, model):
+        """
+        Equivalent to gdss get_score_fn(sde, model, train=False, continuous=True)
+        for VP-SDE, inlined to avoid the losses.py module-name collision.
+        Returns score = -ε_pred / std  (i.e. ∇ log p_t).
+        """
+        model.eval()
+        _m = model.module if hasattr(model, 'module') else model
+        _takes_time = getattr(_m, 'takes_time', False)
+
+        def score_fn(x, adj, flags, t):
+            with torch.no_grad():
+                out = model(x, adj, flags, t=t) if _takes_time else model(x, adj, flags)
+            # marginal_prob(zeros, t)[1] gives std without touching x
+            std = sde.marginal_prob(torch.zeros_like(adj), t)[1]
+            return -out / std[:, None, None]
+
+        return score_fn
 
     # ------------------------------------------------------------------
     @classmethod
@@ -147,13 +163,47 @@ class GDSSDiffusionDenoiser:
         _gdss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gdss')
         if _gdss_dir not in sys.path:
             sys.path.insert(0, _gdss_dir)
-        from gdss.utils.loader import load_model_from_ckpt, load_sde
 
-        ckpt       = torch.load(ckpt_path, map_location=device)
-        cfg        = ckpt['model_config']
-        model_adj  = load_model_from_ckpt(ckpt['params_adj'], ckpt['adj_state_dict'], device)
-        model_x    = load_model_from_ckpt(ckpt['params_x'],   ckpt['x_state_dict'],   device)
-        sde_adj    = load_sde(cfg.sde.adj)
+        # Import only sde.py and model files — neither depends on losses.py,
+        # so there is no collision with the top-level losses.py.
+        from sde import VPSDE, VESDE, subVPSDE
+        from models.ScoreNetwork_A import ScoreNetworkA
+        from models.ScoreNetwork_X import ScoreNetworkX, ScoreNetworkX_GMH
+        from models.ScoreNetwork_Transformer import (ScoreNetworkA_Transformer,
+                                                     ScoreNetworkX_Transformer)
+
+        _constructors = {
+            'ScoreNetworkX':             ScoreNetworkX,
+            'ScoreNetworkX_GMH':         ScoreNetworkX_GMH,
+            'ScoreNetworkA':             ScoreNetworkA,
+            'ScoreNetworkA_Transformer': ScoreNetworkA_Transformer,
+            'ScoreNetworkX_Transformer': ScoreNetworkX_Transformer,
+        }
+
+        def _load_model(params, state_dict):
+            p = params.copy()
+            model_type = p.pop('model_type')
+            model = _constructors[model_type](**p)
+            if state_dict and 'module.' in list(state_dict.keys())[0]:
+                state_dict = {k[7:]: v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
+            return model.to(device)
+
+        def _load_sde(cfg):
+            if cfg.type == 'VP':
+                return VPSDE(beta_min=cfg.beta_min, beta_max=cfg.beta_max, N=cfg.num_scales)
+            elif cfg.type == 'VE':
+                return VESDE(sigma_min=cfg.beta_min, sigma_max=cfg.beta_max, N=cfg.num_scales)
+            elif cfg.type == 'subVP':
+                from sde import subVPSDE
+                return subVPSDE(beta_min=cfg.beta_min, beta_max=cfg.beta_max, N=cfg.num_scales)
+            raise NotImplementedError(f'SDE type {cfg.type}')
+
+        ckpt      = torch.load(ckpt_path, map_location=device)
+        cfg       = ckpt['model_config']
+        model_adj = _load_model(ckpt['params_adj'], ckpt['adj_state_dict'])
+        model_x   = _load_model(ckpt['params_x'],   ckpt['x_state_dict'])
+        sde_adj   = _load_sde(cfg.sde.adj)
 
         return cls(model_adj, model_x, sde_adj, cfg.data.max_feat_num, device, t_min)
 
