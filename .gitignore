@@ -1,9 +1,11 @@
 __pycache__/
 *.pyc
-*.pth
+# *.pth
 *.pkl
-!gdss/data/sem_SF_d20.pkl
-!gdss/checkpoints/*
+!gdss/data/sem_SF_d20_low_weights.pkl
+# !gdss/checkpoints/sem_SF_d20_transformer_low_weights
+# !gdss/config/sem_SF_d20.pkl
+# !gdss/config/sem_SF_d20_transformer_low_weights.yaml
 *.egg-info/
 .DS_Store
 logs_train/
