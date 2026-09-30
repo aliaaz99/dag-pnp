@@ -15,9 +15,17 @@ Nicolas Zilberstein, Ali Azizpour, Gonzalo Mateos, and Santiago Segarra, “DAG-
 | `table3.py` | Sample-size sensitivity |
 | `table4.py` | Sachs protein network |
 
-## Display results
+## Setup
 
-Python 3.7+ is sufficient; no additional packages are needed:
+The table-printing scripts need Python 3.7 or newer and no third-party packages. To run the optimization experiments, create a Python 3.7.12 environment and install the pinned dependencies:
+
+```bash
+conda create -n dag-pnp python=3.7.12
+conda activate dag-pnp
+python -m pip install -r requirements.txt
+```
+
+## Display results
 
 ```bash
 python table1.py
@@ -32,11 +40,9 @@ so the scripts can be invoked from any directory.
 
 ## Run experiments
 
-The optimization pipeline was tested with Python 3.7.12 and the dependencies
-pinned in `requirements.txt`. In a separate Python 3.7 environment:
+With the setup above, run the experiments using:
 
 ```bash
-python -m pip install -r requirements.txt
 python rerun.py 1 --output outputs/table1
 python rerun.py 2 --output outputs/table2
 python rerun.py 3 --output outputs/table3
