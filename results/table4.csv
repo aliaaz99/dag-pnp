@@ -1,0 +1,17 @@
+method,setting,metric,mean,std,mean_decimals,std_decimals
+Greedy-BIC,,shd,23.000,0.000,1,1
+Greedy-BIC,,h,0.000,0.000,2,2
+Greedy-BIC,,fit,1.909,0.000,2,2
+Greedy-BIC,,f1,0.258,0.000,2,2
+NOTEARS,,shd,44.900,4.657,1,1
+NOTEARS,,h,0.002,0.000,3,3
+NOTEARS,,fit,0.981,0.015,2,2
+NOTEARS,,f1,0.314,0.045,2,2
+DAGMA,,shd,29.400,1.497,1,1
+DAGMA,,h,0.015,0.000,3,3
+DAGMA,,fit,2.188,0.300,2,2
+DAGMA,,f1,0.297,0.022,2,2
+DAG-PnP,,shd,26.900,2.071,1,1
+DAG-PnP,,h,0.019,0.006,3,3
+DAG-PnP,,fit,5.080,1.870,2,2
+DAG-PnP,,f1,0.442,0.036,2,2

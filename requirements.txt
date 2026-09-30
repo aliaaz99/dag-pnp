@@ -1,0 +1,8 @@
+# Optional optimization reruns; table scripts need only the Python standard library.
+# Tested with Python 3.7.12 in the original local GDSS environment.
+numpy==1.21.6
+scipy==1.7.1
+torch==1.13.1
+matplotlib==3.4.2
+networkx==2.6.3
+easydict==1.9

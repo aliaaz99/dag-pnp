@@ -1,0 +1,37 @@
+{
+  "num_iters": 1000,
+  "num_seeds": 10,
+  "lambda_data": 1.0,
+  "lambda_dag": 0.01,
+  "eta": 0.1,
+  "c": 0.3,
+  "epsilon": 1e-06,
+  "s": 4.0,
+  "delta_min": 1e-06,
+  "k_edges": 4,
+  "weight_low": 0.2,
+  "weight_high": 0.5,
+  "noise_std": 1.0,
+  "threshold": "mean off-diagonal absolute estimate, applied to estimate AND ground truth",
+  "std_ddof": 0,
+  "torch_seed": 0,
+  "W_max": "3*sqrt(4*d*0.13)+1",
+  "sde": "VP beta_min=0.1 beta_max=1.0; linear time 1 -> 0.0001; mixing min(std/mean,0.4)",
+  "d": 20,
+  "n": [
+    20,
+    100,
+    200
+  ],
+  "graph_family": "SF",
+  "graph_seed": "1000*i",
+  "sem_seed": "1000*i+1",
+  "normalise": "True at n/d=1; False at n/d=5,10",
+  "checkpoint": "SF",
+  "denoise_every": "5 at n/d=1, 10 at 5,10",
+  "l1": {
+    "NOTEARS": 0.01,
+    "DAGMA": 0.005,
+    "DAG-PnP": 0.0
+  }
+}
