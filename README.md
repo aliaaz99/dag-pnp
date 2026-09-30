@@ -1,6 +1,12 @@
 # DAG-PnP
 
-Code, pretrained diffusion models, data and result summaries for four experiments:
+DAG-PnP is a plug-and-play method for causal discovery from observational data. It combines gradient updates for a linear structural equation model with a DAGMA acyclicity penalty and a learned diffusion prior over weighted directed acyclic graphs. A barrier-aware step size and projection help keep estimates within the feasible region. This repository provides the code, pretrained diffusion models, input data and result summaries for the experiments described in the paper.
+
+## Please cite this paper
+
+If you use this code or its results, please cite:
+
+Nicolas Zilberstein, Ali Azizpour, Gonzalo Mateos, and Santiago Segarra, “DAG-PnP: Plug-and-Play Causal Discovery with Diffusion Priors.”
 
 | Script | Experiment |
 |---|---|
