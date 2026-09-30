@@ -1,0 +1,756 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{silence}
+\WarningFilter{latex}{Command \showhyphens has changed}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow} 
+\usepackage{mysymbol}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+		T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+% Theorem environments (not defined in mysymbol.sty)
+\newtheorem{theorem}{\bf Theorem}
+\newtheorem{lemma}{\bf Lemma}
+\newtheorem{remark}{\bf Remark}
+
+% Paper-specific shorthand definitions
+\newcommand{\Ldata}{\ccalL_{\mathrm{data}}}
+\newcommand{\Lext}{\ccalL_{\mathrm{exp}}}
+\newcommand{\Rprior}{\ccalR_{\mathrm{prior}}}
+
+\newcommand{\nz}[1]{{\color{red}{[Nicolas: #1]}}}
+\newcommand{\sms}[1]{{\color{cyan}{[SS: #1]}}}
+\newcommand{\ali}[1]{{\color{blue}{[ali: #1]}}}
+
+
+\begin{document}
+	
+	\title{DAG-PnP: Plug-and-Play Causal Discovery\\ with Diffusion Priors}
+	\author{%
+		\IEEEauthorblockN{Nicolas Zilberstein$^{\dagger}$, Ali Azizpour$^{\dagger}$, Gonzalo Mateos$^{*}$, and Santiago Segarra$^{\dagger}$}
+		\IEEEauthorblockA{$^{\dagger}$Rice University, USA \hspace{2cm} $^{*}$University of Rochester, USA}
+	}
+	
+	\maketitle
+	
+	\begin{abstract}
+		Causal discovery from observational data is challenging: outside specific identifiable regimes the joint distribution does not uniquely determine a directed acyclic graph (DAG), and even when uniqueness holds the combinatorial search over DAGs is notoriously hard at finite sample sizes. These difficulties motivate structural priors beyond data fit. Continuous optimization methods such as NOTEARS and DAGMA enforce acyclicity via differentiable penalties but do not incorporate learned priors over graph structure. 
+        We propose DAG-PnP, a plug-and-play algorithm that combines gradient steps on a linear structural equation model (SEM) data-fidelity objective with a DAGMA acyclicity penalty. It then applies denoising steps from a diffusion model trained on weighted DAGs. A barrier-aware step-size rule handles the singular geometry near the DAGMA feasible boundary. We establish a local fixed-point convergence result for the deterministic iteration under denoiser regularity assumptions. On synthetic SEMs and real-world cell signaling data, DAG-PnP recovers more plausible DAG structures than DAGMA or NOTEARS alone. 
+        %\sms{something about real data here?}
+	\end{abstract}
+	
+	\begin{IEEEkeywords}
+		Causal discovery, plug-and-play, diffusion models, directed acyclic graphs, structural equation models.
+	\end{IEEEkeywords}
+	
+	%% ============================================================
+	\section{Introduction}
+	%% ============================================================
+	
+	Recovering a directed acyclic graph (DAG) from observational data is fundamentally difficult: depending on the data-generating process, the joint distribution either uniquely determines a DAG or only its Markov equivalence class~\cite{peters2017elements, spirtes2000causation}, and in either case finite-sample search over DAGs is combinatorially hard. These difficulties motivate structural priors that encode preferences over graph topologies beyond what the data alone can determine.
+	
+	Continuous optimization approaches to causal discovery replace the combinatorial DAG constraint with differentiable surrogates: judicious nonconvex functions of the adjacency matrix whose zeroth level set corresponds to the set of DAGs. NOTEARS~\cite{zheng2018dags} formulates DAG learning as a smooth constrained optimization problem using a matrix-exponential acyclicity penalty, while DAGMA~\cite{bello2022dagma} introduces a log-determinant characterization that improves optimization stability and the ability to detect longer cycles. These methods are computationally efficient but rely solely on data fidelity and the acyclicity constraint, without incorporating learned structural priors. On the other hand, Bayesian approaches~\cite{heckerman1995learning} and sampling-based methods~\cite{deleu2022bayesian, charpentier2022sampling} provide distributional priors over graph structures but are computationally heavy or not naturally coupled with explicit structural equation model (SEM) objectives. 
+    Plug-and-play (PnP) methods~\cite{venkatakrishnan2013pnp, graikos2022diffusion} offer a modular alternative: they separate the data-fidelity objective from an implicit prior accessed through a denoiser, avoiding the need for full Bayesian inference while retaining the benefits of a learned prior.
+	
+	We propose DAG-PnP, a plug-and-play (PnP) algorithm for causal discovery that alternates between (i) a gradient step on the linear SEM data-fidelity loss combined with a DAGMA acyclicity penalty; and (ii) a denoising step from a diffusion model trained on weighted DAGs. The explicit objective enforces agreement with observed data and the acyclicity constraint, while the denoiser injects a learned structural prior that biases solutions toward plausible graph topologies. To handle the singular geometry of the DAGMA feasible region, we introduce a barrier-aware step-size rule that shrinks the step size near the boundary, preserving feasibility throughout the iteration.
+	
+	\vspace{1mm}
+	\noindent {\bf Contributions and paper outline.}
+	Our main contributions are as follows:
+	(i) We propose DAG-PnP, a plug-and-play algorithm that combines linear SEM data fidelity, a DAGMA acyclicity penalty, and a diffusion prior over weighted DAGs for causal discovery (Section~\ref{sec:algorithm}).
+	(ii) We introduce a barrier-aware step-size rule that preserves feasibility of the gradient substep near the boundary of the DAGMA domain (Section~\ref{ssec:barrier_ss}).
+	(iii) We establish a local fixed-point convergence result for the deterministic DAG-PnP map under denoiser regularity assumptions (Section~\ref{sec:theory}).
+	(iv) We demonstrate on synthetic SEM benchmarks and the real-world Sachs protein-signaling dataset that coupling explicit optimization with a learned diffusion prior improves DAG recovery over baselines (Section~\ref{sec:experiments}). Concluding remarks including a discussion of limitations and future work are given in Section \ref{sec:conclusion}.
+	
+	%% ============================================================
+	\section{Problem Formulation and Background}
+	\label{sec:background}
+	%% ============================================================
+	
+	\subsection{Linear SEMs and data fidelity}
+	
+	Consider a data matrix $\bbX \in \reals^{n \times d}$ comprising $n$ i.i.d. observations generated by a linear SEM $\bbX = \bbX \bbW + \bbE$, where $\bbW \in \reals^{d \times d}$ is a weighted adjacency matrix encoding causal relationships and $\bbE \in \reals^{n \times d}$ is a noise matrix whose columns are mutually independent random vectors.
+    %\blue{[GM: sure, the rows (samples) are i.i.d. random vectors as we say in the opening line. But what is critical in SEM modeling is that the exogenous noise variables are mutually independent (columns here). The noise distribution affects identifiability. Non-Gaussian is enough, or Gaussian with equal noise variances. It is typical in experiments to try different noise distributions (Normal, Exponential, Laplace). We only do standard Gaussian and that is perfectly fine. We could say here that errors are standard Normal since that is all we test later, but no need I think since all applies more broadly.]} 
+    The entry $W_{ij} \neq 0$ indicates a direct causal effect from variable $i$ to variable $j$, and the matrix $\bbW$ must correspond to a DAG (i.e., $W_{ii} = 0$ for all $i$ and the directed graph induced by $\bbW$ is acyclic). Adopting the ordinary least-squares (OLS) loss
+	%
+	\begin{equation}\label{eq:data_fidelity}
+		\Ldata(\bbW) = \frac{1}{2n} \| \bbX - \bbX \bbW \|_F^2,
+	\end{equation}
+	%
+	as a data-fidelity term, our goal is to estimate a DAG-compatible $\bbW$ that minimizes~\eqref{eq:data_fidelity} subject to an acyclicity constraint. 
+	
+	\subsection{DAGMA acyclicity penalty}
+	
+	DAGMA~\cite{bello2022dagma} characterizes acyclicity through the smooth, nonconvex log-determinant function
+	%
+	\begin{equation}\label{eq:dagma}
+		h(\bbW) = -\log \det(s\bbI - \bbW \circ \bbW) + d \log s,
+	\end{equation}
+	%
+	where $s > 0$ is a fixed parameter and $\circ$ denotes the Hadamard product. The function $h$ is defined on the open set $\ccalW_s = \{ \bbW \in \reals^{d \times d} : \det(s\bbI - \bbW \circ \bbW) > 0 \}$ and satisfies $h(\bbW) = 0$ if and only if the graph induced by $\bbW$ is a DAG. The gradient is given by
+	%
+	\begin{equation}\label{eq:dagma_grad}
+		\nabla h(\bbW) = 2\bbW\circ(s\bbI - \bbW \circ \bbW)^{-\top},
+	\end{equation}
+	%
+	which is smooth on $\ccalW_s$ but grows unbounded as $\bbW$ approaches the boundary $\partial \ccalW_s$ where $\det(s\bbI - \bbW \circ \bbW) \to 0$. This singular behavior near the boundary motivates the barrier-aware step-size rule introduced in Section~\ref{ssec:barrier_ss}.
+	
+	\subsection{Plug-and-play (PnP) priors and diffusion denoisers}
+	\label{ssec:back_pnp}
+    % Plug-and-play methods~\cite{venkatakrishnan2013pnp} alternate between an explicit optimization step on a data-fidelity objective and a denoising step that acts as implicit regularization.
+    % Originally developed for image restoration, PnP methods have been extended to use diffusion model denoisers as implicit priors~\cite{graikos2022diffusion}. In our setting, a diffusion model is trained on samples of weighted DAG adjacency matrices drawn from a graph generative process~\cite{vignac2023digress}. \blue{[GM: arguably we are too succinct here and this could benefit from further elaboration.]}\nz{The "drawn from a graph generative process" is not clear; I will come over this later.} The resulting denoiser $D_\sigma: \reals^{d \times d} \mapsto \reals^{d \times d}$ maps a noisy adjacency matrix toward the learned distribution of DAGs at noise level $\sigma$ \blue{[GM: again, this noise business and level is not quite clear here]}. 
+    % By Tweedie's formula~\cite{efron2011tweedie}, the denoiser is connected to the score of the noisy data distribution, providing a principled link between denoising and implicit regularization.
+    % \nz{This subsection is not clear. I will modify later.}
+
+    Plug-and-play (PnP) methods~\cite{venkatakrishnan2013pnp} alternate between an explicit optimization step on a data-fidelity objective and a denoising step that acts as implicit regularization. 
+    Originally developed for image restoration with non-learned denoisers, PnP has since been extended to neural-network-based denoisers and, in particular, to diffusion model denoisers as implicit priors~\cite{graikos2022diffusion, renaud2024plug}. 
+    In a nutshell, diffusion models consist of two processes modeled using stochastic differential equations: a forward process that gradually corrupts a clean signal with noise, and a reverse process that learns to generate data by iteratively denoising~\cite{sohl2015deep, ho2020denoising, song2020score}.
+    In our setting, a diffusion model is trained on samples of weighted DAG adjacency matrices drawn from a target distribution $p(\bbW)$, using the score-based graph diffusion framework of GDSS~\cite{jo2022score}.
+    By Tweedie's formula~\cite{efron2011tweedie}, which relates the score function of the reverse diffusion process to a corresponding denoiser, the trained model yields a \emph{multi-scale} family of denoisers $\{D_{\sigma_t} \colon \reals^{d \times d} \times \reals \to \reals^{d \times d}\}_{t=1}^{T}$.
+    Each denoiser maps a noisy adjacency matrix $\bbW_t = \alpha_t \bbW + \sigma_t \bbepsilon$, with $[\bbepsilon]_{ij}\sim\ccalN(0,1)$ independently, back toward the clean DAG $\bbW$, where $\alpha_t$ and $\sigma_t$ are determined by the noise schedule of the diffusion process~\cite{song2020score}.\vspace{2pt}
+    % $\sigma_t$ and $\alpha_t$\nz{I am trying to be very concise here to avoid introducing all the diffusion machinery}
+    
+    \noindent \textbf{Distinct innovations in context.} Although previous works have developed sampling and optimization methods for graph inverse problems~\cite{sharma2024diffuse, madeira2024generative, tenorio2025graph, chen2026prior}, DAG-PnP differs in two key ways: $(i)$ it is specifically designed for DAGs, whereas existing methods focus almost exclusively on undirected graphs; and $(ii)$ we adopt a %approach the problem from a 
+    formal optimization perspective rather than relying on guided sampling. The method closest to ours is PRODIGY \cite{sharma2024diffuse}. Unlike PRODIGY, which inserts an optimization step into the sampling process to handle nonsmooth constraints, our approach utilizes the diffusion-based denoiser as an implicit prior within a unified optimization objective.
+    
+	%% ============================================================
+	\section{The DAG-PnP Algorithm}
+	\label{sec:algorithm}
+	%% ============================================================
+	
+	\subsection{Optimization formulation}
+	
+	We frame causal discovery as the optimization problem
+	%
+	\begin{equation}\label{eq:opt}
+		\min_{\bbW \in \ccalW_s} \; \Lext(\bbW) + \Rprior(\bbW),
+	\end{equation}
+	%
+	where the explicit objective combines data fidelity \eqref{eq:data_fidelity} and the acyclicity penalty \eqref{eq:dagma} as
+	%
+	\begin{equation}\label{eq:Lext}
+		\Lext(\bbW) = \lambda_{\mathrm{data}} \, \Ldata(\bbW) + \lambda_{\mathrm{dag}} \, h(\bbW),
+	\end{equation}
+	%
+	with hyperparameters $\lambda_{\mathrm{data}}, \lambda_{\mathrm{dag}} > 0$, and $\Rprior$ is an implicit regularizer accessed only through the denoiser $D_\sigma$. Rather than specifying $\Rprior$ in closed form, we replace its proximal step with a denoising operation, following the PnP paradigm. An $\ell_1$ sparsity penalty can be readily incorporated into $\Lext$, but we opt against it here: the diffusion prior, trained on weighted DAGs that are themselves sparse, induces structural sparsity implicitly through the denoising step.
+    
+	\subsection{The PnP iteration}
+	
+	The proposed DAG-PnP algorithm alternates two steps at each iteration 
+    $k=0,1,2,\ldots$.
+    First, a gradient step on the explicit objective
+    %
+    \begin{equation}\label{eq:grad_step}
+        \bbZ^{(k+1)} = \bbW^{(k)} - \gamma_k \nabla \Lext(\bbW^{(k)}),
+    \end{equation}
+    %
+    where $\gamma_k > 0$ is a step size we carefully design in 
+    Section~\ref{ssec:barrier_ss}. 
+    Second, a denoising step that imposes the learned prior. 
+    Because the denoiser $D_{\sigma_k}$ expects an input at noise level $\sigma_k$, we first construct $\tbZ^{(k+1)}$, which is a corrupted version of the estimate $\bbZ^{(k+1)}$ via the forward diffusion model as described in Section~\ref{ssec:back_pnp}.
+    The denoised output is then blended with the gradient iterate:
+    %
+    \begin{equation}\label{eq:denoise_step}
+        \widetilde{\bbW}^{(k+1)} = (1-\lambda_k)\bbZ^{(k+1)} 
+        + \lambda_k D_{\sigma_k}(\tbZ^{(k+1)}),
+    \end{equation}
+    %
+    where $\lambda_k \in [0,1]$ controls how strongly the prior acts 
+    at iteration $k$. The schedules for $\lambda_k$ and $\sigma_k$ are 
+    outlined in Section~\ref{ssec:noise_schedule}.
+	Because the denoiser is not guaranteed to preserve membership in $\ccalW_s$, we append a projection step that enforces the uniform bound and interior constraint required by the feasibility analysis in Section \ref{sec:theory}:
+	%
+	\begin{equation}\label{eq:proj_step}
+		\bbW^{(k+1)} = \Pi_{\ccalK}(\widetilde{\bbW}^{(k+1)}),
+	\end{equation}
+	%
+	where $\ccalK$ is a compact feasible set defined as
+	%
+    \begin{equation}\label{eq:calK}
+		 \ccalK = \big\{ \bbW \in \ccalW_s : s_{\min}(s\bbI - \bbW \circ \bbW) \geq \delta_{\min},\; \|\bbW\|_F \leq W_{\max}\big\},
+	\end{equation}
+	%
+	with $\delta_{\min} > 0$ a small singular-value buffer and $W_{\max} > 0$ a norm bound. The set $\ccalK$ is compact: the norm constraint makes it bounded, and closedness follows because $s_{\min}$ (a continuous function of the matrix entries) and the Frobenius norm define closed sublevel/superlevel sets. Membership in $\ccalK$ in turn induces a determinant lower bound $\det(s\bbI - \bbW \circ \bbW) \geq \delta_{\min}^d$, since $|\det \bbA| = \prod_i s_i(\bbA) \geq s_{\min}(\bbA)^d$ and the sign is fixed by $\bbW \in \ccalW_s$. Together these guarantees keep iterates strictly interior to $\ccalW_s$ and ensure the DAGMA penalty~\eqref{eq:dagma} and its gradient~\eqref{eq:dagma_grad} remain finite throughout. In practice, $W_{\max}$ is chosen conservatively based on the scale of the data and $\delta_{\min}$ is set to a small positive value (e.g., $10^{-6}$); well-trained denoisers on DAG distributions rarely trigger the projection as we have observed in our experiments.
+
+
+	
+	\subsection{Barrier-aware step size}\label{ssec:barrier_ss}
+	
+	The gradient $\nabla h(\bbW)$ in~\eqref{eq:dagma_grad} grows unbounded as $\bbW$ approaches $\partial \ccalW_s$, so a fixed step size can push the iterate outside the feasible set. Consider a distance-to-boundary proxy
+	%
+	\begin{equation}\label{eq:delta}
+		\delta(\bbW) = s_{\min}(s\bbI - \bbW \circ \bbW),
+	\end{equation}
+	%
+	where $s_{\min}(\cdot)$ denotes the smallest singular value. Since $\bbW \in \ccalK$ ensures that $\delta(\bbW) \geq \delta_{\min} > 0$, the proxy is strictly positive throughout and $\delta(\bbW) \to 0$ only as $\bbW \to \partial \ccalW_s$.
+	
+	Because the magnitude of the gradient grows as $O(1/\delta)$ near the boundary, a step size that only shrinks linearly with $\delta$ is (in theory) insufficient and will eventually overshoot the domain. Furthermore, normalizing purely by the gradient hinders convergence, since the step size would blow up as the gradient vanishes near a local minimum. To address both issues, we introduce the following bounded, gradient-normalized barrier rule for the step-size updates
+	%
+	\begin{equation}\label{eq:step_size}
+		\gamma_k = \min\left( \eta, \; c \frac{\delta(\bbW^{(k)})}{\|\nabla \Lext(\bbW^{(k)})\|_F + \epsilon} \right),
+	\end{equation}
+	%
+	where $\eta > 0$ is a base step size, $c \in (0, 1)$ is a safety factor, and $\epsilon > 0$ is a small smoothing constant that prevents division by zero near stationary points. When the gradient is small, the ratio $c\delta/(\|\nabla\Lext\|_F + \epsilon)$ is large, and the $\min$ operator selects the base step size $\eta$. Near the boundary $\partial \ccalW_s$, the gradient is massive, the barrier term dominates, and the step magnitude is safely bounded to physically prevent the iterate from escaping the feasible region.
+	%
+	\begin{remark}
+		The smoothing constant $\epsilon$ ensures the step-size rule is well-defined everywhere, including at stationary points where $\nabla \Lext(\bbW) = \mathbf{0}$. In this regime, $\delta(\bbW) / \epsilon$ dominates and the $\min$ operator selects $\eta$. Any $\epsilon$ satisfying $0 < \epsilon \ll \eta^{-1} \delta_{\min}$, where $\delta_{\min}$ is the singular-value buffer in~\eqref{eq:calK}, preserves the step-size rule in the non-stationary regime up to negligible perturbations.
+        %\sms{weird last sentence, reword.}
+	\end{remark}
+	
+	\subsection{Noise scheduling}
+    \label{ssec:noise_schedule}
+	% \nz{At the end, we are using the scheduling from the diffusion model -- which works better in practice --, so I think we can probably mention this briefly either here or in the numerical section, but we don't need a separate subsection for this.}
+    The noise levels $\sigma_k$ and signal coefficients $\alpha_k$ 
+    are inherited from the variance-preserving (VP) scheduling of 
+    the diffusion model, which defines a discrete sequence of noise scales $\beta_0, \ldots, \beta_K$ spaced linearly between $\beta_{\min}$ and $\beta_{\max}$, from which the signal and noise coefficients are obtained as $\alpha_k = \sqrt{\bar{\alpha}_k}$ and 
+    $\sigma_k = \sqrt{1 - \bar{\alpha}_k}$, where $\bar{\alpha}_k = \prod_{i=0}^{k}(1 - \beta_i)$. 
+    At $k=0$ the signal is approximately preserved ($\alpha_0 \approx 1$, $\sigma_0 \approx 0$), while at $k=K$ the signal is nearly destroyed.
+    The DAG-PnP iterations traverse this schedule in reverse, evaluating the denoiser from $\{\alpha_K, \sigma_K\}$ to $\{\alpha_0, \sigma_0\}$. Inspired by~\cite{mardani2023variational}, the blending weight in~\eqref{eq:denoise_step} is set proportional to the inverse signal-to-noise ratio,
+    %
+    \begin{equation}\label{eq:lambda_schedule}
+        \lambda_k = \frac{\sigma_k}{\alpha_k}.
+    \end{equation}
+    %
+    In early iterations, when the noise level is high, $\lambda_k$ is large and the denoiser acts strongly; as the iterate approaches clean data, $\lambda_k$ decreases and the data-fidelity term dominates.
+
+    The complete DAG-PnP scheme is tabulated in Algorithm~\ref{alg:dagpnp}.
+    
+  %    We couple the denoiser noise level $\sigma_k$ to the normalized SEM residual at each iteration as
+	% % %
+	% \begin{equation}\label{eq:noise_schedule}
+	% 	\hat{\sigma}_k^2 = \alpha \frac{\|\bbX - \bbX\bbW^{(k)}\|_F^2}{\|\bbX\|_F^2}.
+	% \end{equation}
+	% %
+	% By normalizing by the uncentered energy (squared Frobenius norm) of the observed data space, we ensure the noise schedule remains scale-invariant. Here, $\alpha > 0$ is a scaling hyperparameter that maps the dimensionless relative data error to the parameter-space noise variance expected by the diffusion model. The intuition is that a large normalized residual indicates the iterate is far from a good solution, warranting a stronger prior (larger $\hat{\sigma}_k$), while a small residual signals proximity to the solution, where lighter denoising is appropriate. 
+ %    Since the diffusion model is trained over a continuous interval of noise levels, the denoisers $D_{\sigma_t}$ naturally support any value of $\hat{\sigma}_k$, with no discretization or rounding required.
+ %    In practice, we clip $\hat{\sigma}_k$ to a predefined range $[\sigma_{\min}, \sigma_{\max}]$ and apply exponential smoothing for stability.
+	
+	\begin{algorithm}[t]
+		\caption{DAG-PnP}\label{alg:dagpnp}
+		\scalebox{0.80}{
+			\begin{minipage}{\linewidth}
+				\begin{algorithmic}[1]
+					\Require Data $\bbX$, denoiser $D_\sigma$, model hyperparameters $\lambda_{\mathrm{data}}, \lambda_{\mathrm{dag}}, \eta, c, \epsilon, s, \{\alpha_k, \sigma_k\}_{k=0}^{K-1}, W_{\max}, \delta_{\min}$
+					\State Initialize $\bbW^{(0)} \in \ccalK, \{\lambda_k\}_{k=0}^{K-1}$
+					\For{$k = 0, 1, \ldots, K-1$}
+					\State Compute $\nabla \Lext(\bbW^{(k)})$ via~\eqref{eq:data_fidelity},~\eqref{eq:dagma_grad},~\eqref{eq:Lext}
+					\State Set $\gamma_k$ as in \eqref{eq:step_size}
+					\State $\bbZ^{(k+1)} = \bbW^{(k)} - \gamma_k \nabla \Lext(\bbW^{(k)})$ 
+                    \Comment{{\footnotesize{Gradient}}}
+					% \State Compute $\hat{\sigma}_k$ via~\eqref{eq:noise_schedule}; clip to $[\sigma_{\min}, \sigma_{\max}]$
+                    \State $\tilde{\bbZ}^{(k+1)} = \alpha_k \bbZ^{(k+1)} + \sigma_k \bbepsilon, \; \bbepsilon\sim\ccalN(0,\bbI)$  \Comment{{\footnotesize{Renoising}}}
+                    \State $\widetilde{\bbW}^{(k+1)} \!=\! (1\!-\!\lambda_k)\bbZ^{(k+1)} \!+\! \lambda_k D_{{\sigma}_k}(\tbZ^{(k+1)})$ \Comment{{\footnotesize{Denoising}}}					\State $\bbW^{(k+1)} = \Pi_{\ccalK}(\widetilde{\bbW}^{(k+1)})$ \Comment{{\footnotesize{Projection}}}
+					\EndFor \\
+					\Return $\bbW^{(K)}$
+				\end{algorithmic}
+			\end{minipage}
+		}
+	\end{algorithm}
+	
+	%% ============================================================
+	\section{Theoretical Analysis}
+	\label{sec:theory}
+	%% ============================================================
+
+	Our analysis considers a deterministic simplification of Algorithm~\ref{alg:dagpnp} in which the noise schedule is held fixed at $\sigma_k \equiv \sigma$, the blending weight is set to $\lambda_k = 1$, and the renoising step is omitted (so the denoiser acts directly on $\bbZ^{(k+1)}$). Under these simplifications each iteration applies the composed map
+	%
+	\begin{equation}\label{eq:T_sigma}
+		T_{\sigma}(\bbW) = \Pi_{\ccalK}\big(D_{\sigma}(\bbW - \gamma(\bbW)\, \nabla \Lext(\bbW))\big),
+	\end{equation}
+	%
+	with $\gamma(\bbW)$ given by~\eqref{eq:step_size}. The full stochastic algorithm with $\lambda_k$-blending and renoising is the one used in our experiments; extending the analysis to that setting is left for future work. This setting is the analytical framework in which standard PnP convergence guarantees rest~\cite{ryu2019plugandplay}; the new technical content here is the feasibility analysis under the DAGMA log-determinant geometry.
+
+		Within this simplified iteration we establish that: (i) the gradient substep preserves membership in the DAGMA domain $\ccalW_s$; and (ii) the iteration $\bbW^{(k+1)} = T_{\sigma}(\bbW^{(k)})$ converges to a local fixed point under regularity assumptions. By utilizing the $\min$ operator in the step-size rule~\eqref{eq:step_size} together with the norm projection~\eqref{eq:proj_step}, our framework unifies boundary avoidance with Banach fixed-point convergence near a stationary minimum. By construction of Algorithm~\ref{alg:dagpnp}, every iterate satisfies $\bbW^{(k)} \in \ccalK$ for all $k \geq 0$, so the analysis below takes feasibility as given and focuses on regularity of the denoiser and local contraction.
+	
+	\vspace{1mm}
+	\noindent\textbf{Assumption.}
+	We require the following mild condition:
+	%
+	\begin{itemize}
+		\item[\textbf{A1.}] (Local contraction and invariance.) There exists a closed neighborhood $\ccalU \subset \ccalK$ sufficiently far from the boundary such that the base step size is strictly active, meaning $\gamma(\bbW) = \eta$ for all $\bbW \in \ccalU$. Furthermore, the map $T_\sigma(\bbW) = \Pi_{\ccalK}(D_\sigma(\bbW - \eta \nabla \Lext(\bbW)))$ satisfies $T_\sigma(\ccalU) \subseteq \ccalU$, and $\|T_\sigma(\bbW_1) - T_\sigma(\bbW_2)\|_F \leq \rho \|\bbW_1 - \bbW_2\|_F$ for all $\bbW_1, \bbW_2 \in \ccalU$, with contraction factor $\rho < 1$.
+	\end{itemize}
+
+	Assumption~A1 formally defines a region around a local minimum where the gradient is sufficiently small, allowing the gradient step and the denoiser to act jointly as a strict contraction. We discuss sufficient conditions for A1 in Remark~\ref{rem:contraction}.
+	
+	\vspace{1mm}
+	\noindent\textbf{Feasibility of the gradient substep.}
+	We first show that the barrier-aware step-size rule in \eqref{eq:step_size} preserves feasibility of the gradient substep for any iterate in $\ccalK$.
+	
+	\begin{lemma}\label{lem:feasibility}
+		Let $\bbW \in \ccalK$. For the step-size rule defined in~\eqref{eq:step_size} with $c > 0$ satisfying $2c W_{\max} + c^2 (s + W_{\max}^2) < 1$, the gradient substep $\bbZ = \bbW - \gamma \nabla \Lext(\bbW)$ satisfies $\bbZ \in \ccalW_s$.
+	\end{lemma}
+	
+	We deferred the proof to Appendix~\ref{app:proof_lem_feasibility}. 
+    We note that the projection step~\eqref{eq:proj_step} ensures all iterates remain in $\ccalK$, so the bound $\|\bbW^{(k)}\|_F \leq W_{\max}$ required by Lemma~\ref{lem:feasibility} holds by construction at every iteration. Without this projection, the safety condition on $c$ could be violated if the denoiser produces iterates with growing norm.
+	
+	\vspace{1mm}
+	\noindent\textbf{Local fixed-point convergence.}
+	Convergence of the adaptive-$\sigma$ variant in Algorithm~\ref{alg:dagpnp} remains open. Near a local minimum the gradient vanishes, so the barrier term in~\eqref{eq:step_size} grows large and the base step size $\eta$ becomes active, letting us combine the feasibility guarantee of Lemma~\ref{lem:feasibility} with a standard fixed-point analysis in the interior.
+
+	\begin{theorem}\label{thm:convergence}
+		Under Assumption A1, consider the iteration $\bbW^{(k+1)} = T_\sigma(\bbW^{(k)})$ defined by~\eqref{eq:T_sigma} with $\sigma \in [\sigma_{\min}, \sigma_{\max}]$. If the iteration enters the neighborhood $\ccalU$, it converges to a unique fixed point $\bbW^\star \in \ccalU$. Moreover, $\|\bbW^{(k)} - \bbW^\star\|_F \leq \rho^k \|\bbW^{(0)} - \bbW^\star\|_F$.
+	\end{theorem}
+
+    The proof is in Appendix~\ref{app:proof_thm}.
+	Theorem~\ref{thm:convergence} establishes that the fixed point $\bbW^\star$ represents a stable equilibrium between SEM data fidelity, the DAGMA acyclicity constraint, and the learned diffusion prior. We emphasize that this relies on the denoiser being sufficiently regularizing in the neighborhood of a stationary point.
+	
+	\begin{remark}\label{rem:contraction}
+		Assumption~A1 postulates the existence of a contractive neighborhood rather than deriving contraction from primitive quantities. A sufficient condition is the following. If $D_\sigma$ is $L_D$-Lipschitz on $\ccalK$ (a standard PnP assumption~\cite{ryu2019plugandplay} satisfied by well-trained diffusion denoisers) and $\Lext$ is $L$-smooth and $\mu$-strongly convex in a neighborhood of a local minimizer, then for $\eta \leq 1/L$ the gradient step is $(1 - \eta\mu)$-Lipschitz, and the composed map satisfies $\rho \leq L_D(1 - \eta\mu)$, which is strictly less than $1$ whenever $L_D < 1/(1 - \eta\mu)$. Implicit in this bound is that $\Pi_{\ccalK}$ is non-expansive on the relevant domain; since $\ccalK$ is non-convex, this is not automatic in general but holds when the denoiser output already lies in $\ccalK$, so that $\Pi_{\ccalK}$ reduces to the identity. A well-trained denoiser on DAG distributions typically satisfies this in practice, as we observe empirically in Section~\ref{sec:experiments}. In practice, the DAGMA penalty is neither \emph{globally} strongly convex nor globally $L$-smooth, so the contraction region is local and problem-dependent. Deriving verifiable conditions on the SEM parameters and denoiser architecture that guarantee Assumption A1 holds is an interesting direction for future work.
+	\end{remark}
+	
+	%% ============================================================
+	\section{Experiments}
+	\label{sec:experiments}
+	%% ============================================================
+	
+	% [EXPERIMENTS SECTION -- TO BE COMPLETED]
+	% Planned content:
+	% - Synthetic linear SEMs: Erdos-Renyi and scale-free DAGs, d in {20, 50}, Gaussian noise
+	% - Diffusion model trained on sampled weighted DAGs
+	% - Baselines: DAGMA, NOTEARS, one graph-generative baseline
+	% - Metrics: SHD, acyclicity violation, fit error
+	% - Main results table (Table 1)
+	% - Ablation: denoiser on/off, barrier-aware vs. fixed step size, residual vs. fixed noise schedule
+	% - Approximately 1.5 pages reserved for this section
+	
+	% \vspace{5cm} % placeholder vertical space for experiments
+
+    We evaluate DAG-PnP against three baselines across four experiments.
+    Experiment~1 benchmarks overall DAG recovery quality on synthetic linear
+    SEMs; Experiment~2 isolates the contributions of the barrier-aware step
+    size and Frobenius-norm projection; Experiment~3 studies sample size effects; %ablates the residual-based noise schedule; 
+    and Experiment~4 evaluates DAG-PnP on real-world data.
+    
+    \subsection{Experimental setup}
+    \label{ssec:setup}
+    
+    \noindent\textbf{Data generation.}
+    We generate linear SEM data following $\bbX = \bbX\bbW + \bbE$, where
+    $\bbE$ has i.i.d.\ $\mathcal{N}(0, 1.0)$ entries. Ground-truth adjacency matrices $\bbW$ are drawn from two
+    families parameterized by the expected number of edges per node $k$.
+    In \emph{Erd\H{o}s-R\'enyi} (ER$k$) graphs, a random topological ordering is
+    sampled uniformly and each candidate parent edge is included independently
+    with probability $p = 2k/(d-1)$, giving $\mathbb{E}[\text{\# edges}] = kd$.
+    In \emph{scale-free} (SF$k$) graphs, a random topological ordering is sampled
+    and each new node selects $m = k$ parents from preceding nodes via
+    Barab\'asi-Albert preferential attachment (probability proportional to
+    in-degree $+$ 1), giving $\mathbb{E}[\text{\# edges}] = k(d-1) \approx kd$.
+    We use $k = 4$ (ER4/SF4) as the default following
+    \cite{bello2022dagma}. Non-zero edge weights are drawn uniformly from
+    $[-0.5, -0.2]\cup[0.2, 0.5]$.
+    In Experiment~1 we set $n=d$, so $n=20$ for $d=20$ and $n=50$ for $d=50$;
+    Experiment~2 uses $d=n=20$; and Experiment~3 varies $n/d$ explicitly.
+
+    \vspace{1mm}
+	\noindent\textbf{Baselines.}
+    We compare against:
+    (i)~{NOTEARS}~\cite{zheng2018dags}, which minimises $\Ldata$ subject to
+    the matrix-exponential acyclicity constraint
+    $\operatorname{tr}(e^{\bbW\circ\bbW}) - d = 0$ via augmented Lagrangian optimization;
+    (ii)~{DAGMA}~\cite{bello2022dagma}, which uses the log-determinant
+    penalty $h(\bbW)$ from~\eqref{eq:dagma} without a denoiser (i.e., DAG-PnP
+    with identity denoiser $D_\sigma(\bbW)\equiv\bbW$); and
+    (iii)~{Greedy-BIC}~\cite{heckerman1995learning}, a greedy forward search that scores each candidate
+        edge $(i\to j)$ by the local BIC improvement 
+        $\mathrm{score}(j \mid \mathrm{Pa}(j)) = -(n/2)\log(\mathrm{RSS}_j/n) - |\mathrm{Pa}(j)|\log(n)/2$
+    where $\mathrm{RSS}_j$ is the residual sum of squares of regressing $X_j$ on
+    its current parent set $\mathrm{Pa}(j)$, and the second term penalizes model
+    complexity. 
+    % \sms{reference for this third baseline?}
+    % At each step the edge yielding the largest BIC gain is added,
+    % and OLS is used to recover edge weights after the graph is fixed.
+    
+    \vspace{1mm}
+	\noindent\textbf{DAG-PnP denoiser.}
+    We employ a diffusion model trained on samples from the same ER4 and SF4 generative processes with $d=20$. Following %the framework of 
+    \cite{jo2022score}, the model is trained using a denoising score matching loss \cite{vincent2011connection} applied to weighted adjacency matrices $\mathbf{W} \in \mathbb{R}^{d \times d}$. To effectively handle weighted, asymmetric matrices, we replace the standard GNN architecture with the one proposed in~\cite{carballo2025generating}. The key feature of this architecture is a novel dual attention mechanism, rendering the network directionally aware. This modification is fundamental, as it enables the model to process the full adjacency matrix while preserving the inherent orientation of the DAG.
+    
+    \vspace{1mm}
+	\noindent\textbf{Hyperparameters.}  
+    All methods share $\lambda_{\mathrm{data}}=1.0$, $\lambda_{\mathrm{dag}}=0.01$,
+    barrier constant $c = 0.3$, $\epsilon = 10^{-6}$,
+    {$\beta_{\min}=0.1$, $\beta_{\max}=1.0$}, $\eta=0.1$, $\delta_{\min}=10^{-6}$ and $K=1000$ gradient iterations. 
+    % \sms{do these hyperparameters coincide with the hyperparams needed in the Algo?}
+    The feasibility parameter is set to $s = 1.5(2k\,w_{\max}^2) + 1$, following
+    from the Gershgorin bound $\rho(\bbW\circ\bbW)\le 2k\,w_{\max}^2$ (which is
+    {independent of $d$} under the ER$k$/SF$k$ parameterization).
+    % with a $1.5\times$ safety margin.
+    The projection radius is set adaptively to $W_{\max}(d) = 3\sqrt{kd\,\overline{w^2}} + 1$
+    to prevent the Frobenius-norm projection from clipping $\bbW_{\mathrm{true}}$,
+    where $\mathbb{E}[\|\bbW_{\mathrm{true}}\|_F^2] = kd\,\overline{w^2}$ and
+    $\overline{w^2}$ is the % = (w_{\min}^2 + w_{\min}w_{\max} + w_{\max}^2)/3
+    second moment of the edge-weight distribution.
+    All results are averaged over 10 independent random seeds.
+    % \blue{[Ali: The following modification made DAGMA much more stable and led to much more reasonable standard deviations. In some seeds, DAGMA was achieving good F1 scores but very poor fit error due to high variance. However, I am not sure whether applying this normalization is appropriate or not.]}
+    % Before optimization, $\bbX$ is standardized column-wise to unit variance;
+    % the recovered $\hat{\bbW}$ is rescaled to the original data scale via
+    % $\hat{W}_{ij} \leftarrow (\hat{\sigma}_j / \hat{\sigma}_i)\,\hat{W}_{ij}$
+    % before all metric evaluation, so reported SHD, F1, $h(\hat{\bbW})$, and
+    % $\Ldata$ are all on the original scale.
+    % This normalization improves gradient conditioning across variables and
+    % is applied in Experiments~1 and~3 for fairness; Experiment~2 intentionally omits it to expose the hard-conditioning regime in which the barrier-aware step
+    % size engages.
+    
+    \vspace{1mm}
+	\noindent\textbf{Metrics.}
+    Each method returns a \emph{weighted} estimate $\hat{\bbW}\in\mathbb{R}^{d\times d}$.
+    The acyclicity violation $h(\hat{\bbW}){\downarrow}$ and normalized fit error
+    $\Ldata(\hat{\bbW}){\downarrow}$ are evaluated on this continuous,
+    weighted estimate. 
+    For structure-recovery metrics, we first convert $\hat{\bbW}$ into a binary
+    adjacency matrix via thresholding: %its absolute values: 
+    an edge $(i,j)$ is
+    declared present if $|\hat{W}_{ij}|>\tau$. For every method, we set $\tau$
+    to the average magnitude of the off-diagonal entries of that method's
+    estimate $\hat{\bbW}$.
+    We then report structural Hamming distance ($\mathrm{SHD}{\downarrow}$) (fn + fp) and F1
+    score on directed edges ($\mathrm{F1}{\uparrow}$) against the binarized
+    ground-truth in the same way.
+
+% \begin{table*}[t]
+%   \centering
+%   \caption{
+%     Main results on synthetic linear SEMs averaged over 10 seeds
+%     (mean $\pm$ std). \textbf{Bold}: best, \underline{underline}: second best.
+%     Time is wall-clock seconds per run (single seed).}
+%   \label{tab:main}
+%   \scriptsize
+%   \setlength{\tabcolsep}{2pt}
+%   \renewcommand{\arraystretch}{0.9}
+%   \begin{tabular}{llccccccccr}
+%     \toprule
+%     & & \multicolumn{4}{c}{ER4} & \multicolumn{4}{c}{SF4} & \\
+%     \cmidrule(lr){3-6}\cmidrule(lr){7-10}
+%     $d$ & Method
+%       & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$
+%       & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$
+%       & Time(s)$\downarrow$ \\
+%     \midrule
+%     \multirow{4}{*}{20}
+%     & Greedy-BIC & $\mathbf{89.3}{\scriptscriptstyle \pm6.4}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $8.567{\scriptscriptstyle \pm0.994}$ & $0.244{\scriptscriptstyle \pm0.054}$
+%                  & $\mathbf{88.5}{\scriptscriptstyle \pm7.0}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $8.408{\scriptscriptstyle \pm0.653}$ & $0.206{\scriptscriptstyle \pm0.054}$ & $1.4{\scriptscriptstyle \pm0.1}$ \\
+%       & NOTEARS  & $144.1{\scriptscriptstyle \pm10.1}$ & $0.491{\scriptscriptstyle \pm0.072}$ & $\underline{0.719}{\scriptscriptstyle \pm0.160}$ & $\underline{0.267}{\scriptscriptstyle \pm0.045}$
+%                  & $142.3{\scriptscriptstyle \pm9.8}$ & $0.457{\scriptscriptstyle \pm0.059}$ & $\underline{0.803}{\scriptscriptstyle \pm0.192}$ & $\underline{0.251}{\scriptscriptstyle \pm0.036}$ & $0.6{\scriptscriptstyle \pm0.01}$  \\
+%       & DAGMA    & $148.2{\scriptscriptstyle \pm7.5}$ & $1.487{\scriptscriptstyle \pm0.485}$ & $\mathbf{0.589}{\scriptscriptstyle \pm0.146}$ & $0.197{\scriptscriptstyle \pm0.044}$
+%                  & $147.8{\scriptscriptstyle \pm9.3}$ & $1.393{\scriptscriptstyle \pm0.363}$ & $\mathbf{0.673}{\scriptscriptstyle \pm0.181}$ & $0.181{\scriptscriptstyle \pm0.042}$ & $4.1{\scriptscriptstyle \pm0.1}$ \\
+%       & DAG-PnP  & $\underline{132.1}{\scriptscriptstyle \pm7.5}$ & $\underline{0.177}{\scriptscriptstyle \pm0.037}$ & $1.440{\scriptscriptstyle \pm0.240}$ & $\mathbf{0.379}{\scriptscriptstyle \pm0.039}$
+%                  & $\underline{134.4}{\scriptscriptstyle \pm9.7}$ & $\underline{0.152}{\scriptscriptstyle \pm0.035}$ & $1.556{\scriptscriptstyle \pm0.298}$ & $\mathbf{0.347}{\scriptscriptstyle \pm0.031}$ & $6.1{\scriptscriptstyle \pm0.1}$ \\
+%     \midrule
+%     \multirow{4}{*}{50}
+%     & Greedy-BIC & $\mathbf{255.5}{\scriptscriptstyle \pm18.0}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $23.959{\scriptscriptstyle \pm0.889}$ & $\mathbf{0.268}{\scriptscriptstyle \pm0.047}$
+%                  & $\mathbf{256.1}{\scriptscriptstyle \pm12.1}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $23.031{\scriptscriptstyle \pm0.696}$ & $\mathbf{0.242}{\scriptscriptstyle \pm0.040}$ & $101.0{\scriptscriptstyle \pm3.8}$  \\
+%       & NOTEARS  & $964.2{\scriptscriptstyle \pm15.7}$ & $0.903{\scriptscriptstyle \pm0.053}$ & $\underline{1.550}{\scriptscriptstyle \pm0.135}$ & $0.201{\scriptscriptstyle \pm0.013}$
+%                  & $928.4{\scriptscriptstyle \pm38.0}$ & $0.899{\scriptscriptstyle \pm0.080}$ & $\underline{1.698}{\scriptscriptstyle \pm0.163}$ & $0.204{\scriptscriptstyle \pm0.016}$ & $1.6{\scriptscriptstyle \pm0.02}$  \\
+%       & DAGMA    & $967.5{\scriptscriptstyle \pm14.7}$ & $2.644{\scriptscriptstyle \pm0.363}$ & $\mathbf{1.286}{\scriptscriptstyle \pm0.130}$ & $0.185{\scriptscriptstyle \pm0.016}$
+%                  & $944.4{\scriptscriptstyle \pm36.4}$ & $2.639{\scriptscriptstyle \pm0.530}$ & $\mathbf{1.440}{\scriptscriptstyle \pm0.172}$ & $0.186{\scriptscriptstyle \pm0.017}$ & $1.8{\scriptscriptstyle \pm0.03}$  \\
+%       & DAG-PnP  & $\underline{822.1}{\scriptscriptstyle \pm28.8}$ & $\underline{0.217}{\scriptscriptstyle \pm0.022}$ & $3.597{\scriptscriptstyle \pm0.172}$ & $\underline{0.246}{\scriptscriptstyle \pm0.021}$
+%                  & $\underline{805.8}{\scriptscriptstyle \pm16.0}$ & $\underline{0.194}{\scriptscriptstyle \pm0.018}$ & $3.944{\scriptscriptstyle \pm0.225}$ & $\underline{0.231}{\scriptscriptstyle \pm0.005}$ & $6.0{\scriptscriptstyle \pm0.2}$  \\
+%     \bottomrule
+%   \end{tabular}
+% \end{table*}
+
+
+\begin{table*}[t]
+  \centering
+  \caption{
+    Main results on synthetic linear SEMs averaged over 10 seeds
+    (mean $\pm$ std). \textbf{Bold}: best, \underline{underline}: second best.
+    Time is wall-clock seconds per run (single seed).}
+  \label{tab:main}
+  \scriptsize
+  \setlength{\tabcolsep}{2pt}
+  \renewcommand{\arraystretch}{0.9}
+  \begin{tabular}{llccccccccr}
+    \toprule
+    & & \multicolumn{4}{c}{ER4} & \multicolumn{4}{c}{SF4} & \\
+    \cmidrule(lr){3-6}\cmidrule(lr){7-10}
+    $d$ & Method
+      & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$
+      & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$
+      & Time(s)$\downarrow$ \\
+    \midrule
+    \multirow{4}{*}{20}
+    & Greedy-BIC & $\mathbf{89.3}{\scriptscriptstyle \pm6.4}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $8.567{\scriptscriptstyle \pm0.994}$ & $0.244{\scriptscriptstyle \pm0.054}$
+                 & $\mathbf{88.5}{\scriptscriptstyle \pm7.0}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $8.408{\scriptscriptstyle \pm0.653}$ & $0.206{\scriptscriptstyle \pm0.054}$ & $1.4{\scriptscriptstyle \pm0.1}$  \\
+      & NOTEARS  & $142.8{\scriptscriptstyle \pm10.3}$ & $0.239{\scriptscriptstyle \pm0.043}$ & $\underline{1.091}{\scriptscriptstyle \pm0.187}$ & $\underline{0.359}{\scriptscriptstyle \pm0.036}$
+                 & $145.1{\scriptscriptstyle \pm10.3}$ & $0.216{\scriptscriptstyle \pm0.043}$ & $\underline{1.194}{\scriptscriptstyle \pm0.244}$ & $\underline{0.326}{\scriptscriptstyle \pm0.038}$ & $0.6{\scriptscriptstyle \pm0.01}$  \\
+      & DAGMA    & $146.5{\scriptscriptstyle \pm10.5}$ & $0.585{\scriptscriptstyle \pm0.156}$ & $\mathbf{0.770}{\scriptscriptstyle \pm0.162}$ & $0.291{\scriptscriptstyle \pm0.030}$
+                 & $147.1{\scriptscriptstyle \pm9.3}$ & $0.535{\scriptscriptstyle \pm0.135}$ & $\mathbf{0.873}{\scriptscriptstyle \pm0.214}$ & $0.269{\scriptscriptstyle \pm0.044}$ & $4.1{\scriptscriptstyle \pm0.1}$  \\
+      & DAG-PnP  & $\underline{130.2}{\scriptscriptstyle \pm8.7}$ & $\underline{0.176}{\scriptscriptstyle \pm0.035}$ & $1.434{\scriptscriptstyle \pm0.236}$ & $\mathbf{0.391}{\scriptscriptstyle \pm0.047}$
+                 & $\underline{135.2}{\scriptscriptstyle \pm8.2}$ & $\underline{0.150}{\scriptscriptstyle \pm0.039}$ & $1.569{\scriptscriptstyle \pm0.302}$ & $\mathbf{0.345}{\scriptscriptstyle \pm0.036}$ & $6.1{\scriptscriptstyle \pm0.1}$ \\
+    \midrule
+    \multirow{4}{*}{50}
+    & Greedy-BIC & $\mathbf{255.5}{\scriptscriptstyle \pm18.0}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $23.959{\scriptscriptstyle \pm0.889}$ & $\mathbf{0.268}{\scriptscriptstyle \pm0.047}$
+                 & $\mathbf{256.1}{\scriptscriptstyle \pm12.1}$ & $\mathbf{0.000}{\scriptscriptstyle \pm0.000}$ & $23.031{\scriptscriptstyle \pm0.696}$ & $\mathbf{0.242}{\scriptscriptstyle \pm0.040}$ & $101.0{\scriptscriptstyle \pm3.8}$  \\
+      & NOTEARS  & $888.6{\scriptscriptstyle \pm21.1}$ & $0.215{\scriptscriptstyle \pm0.023}$ & $\underline{3.412}{\scriptscriptstyle \pm0.215}$ & $0.230{\scriptscriptstyle \pm0.019}$
+                 & $895.1{\scriptscriptstyle \pm13.0}$ & $0.209{\scriptscriptstyle \pm0.018}$ & $\underline{3.663}{\scriptscriptstyle \pm0.209}$ & $0.207{\scriptscriptstyle \pm0.006}$ & $1.6{\scriptscriptstyle \pm0.02}$   \\
+      & DAGMA    & $931.6{\scriptscriptstyle \pm23.9}$ & $0.487{\scriptscriptstyle \pm0.054}$ & $\mathbf{2.251}{\scriptscriptstyle \pm0.172}$ & $0.213{\scriptscriptstyle \pm0.017}$
+                 & $921.5{\scriptscriptstyle \pm19.6}$ & $0.499{\scriptscriptstyle \pm0.066}$ & $\mathbf{2.432}{\scriptscriptstyle \pm0.196}$ & $0.199{\scriptscriptstyle \pm0.009}$ & $1.8{\scriptscriptstyle \pm0.03}$   \\
+      & DAG-PnP  & $\underline{820.2}{\scriptscriptstyle \pm18.9}$ & $\underline{0.213}{\scriptscriptstyle \pm0.023}$ & $3.605{\scriptscriptstyle \pm0.182}$ & $\underline{0.246}{\scriptscriptstyle \pm0.021}$
+                 & $\underline{806.4}{\scriptscriptstyle \pm17.4}$ & $\underline{0.195}{\scriptscriptstyle \pm0.017}$ & $3.933{\scriptscriptstyle \pm0.208}$ & $\underline{0.229}{\scriptscriptstyle \pm0.007}$ & $6.0{\scriptscriptstyle \pm0.2}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+    
+    %% ------------------------------------------------------------
+    \subsection{Experiment 1: Comparison with baselines}
+    % \sms{choose a different title}}
+    \label{ssec:exp1}
+    %% ------------------------------------------------------------
+    
+    Table~\ref{tab:main} reports performance across $d \in \{20, 50\}$
+    for ER4 and SF4 graphs. DAG-PnP consistently achieves better F1 and
+    lower SHD than both NOTEARS and DAGMA across all settings, with the
+    advantage most pronounced at $d=20$. The higher fit error of DAG-PnP
+    relative to NOTEARS and DAGMA reflects the regularizing effect of the
+    diffusion prior, which steers iterates toward structurally plausible
+    graphs rather than minimizing $\Ldata$ alone. Importantly, DAG-PnP
+    achieves substantially lower $h(\bbW)$ than both NOTEARS and DAGMA,
+    confirming that the denoiser promotes DAG-consistent solutions without
+    over-fitting to the data.
+    
+    Greedy-BIC attains $h(\bbW)=0$ by construction and competitive SHD,
+    but scales poorly with graph size: its runtime grows from $1.4$s at
+    $d=20$ to $101$s at $d=50$ (${\sim}72{\times}$ increase), making it
+    impractical for larger graphs. By contrast, DAG-PnP remains around
+    $6$s at both $d=20$ and $d=50$, far below Greedy-BIC's $101$s at
+    $d=50$, while incurring a moderate constant-factor overhead relative
+    to DAGMA ($1.8$s at $d=50$). 
+    % \ali{This sentence is no longer true:} NOTEARS is the fastest method but produces the worst acyclicity violations and SHD among continuous methods, particularly at $d=50$.
+    
+
+    
+    %% ------------------------------------------------------------
+    \subsection{Experiment 2: Barrier-aware step size and projection}
+    \label{ssec:exp2}
+    
+    We isolate the contributions of the two feasibility mechanisms in DAG-PnP:
+    the barrier-aware step size~\eqref{eq:step_size} and the
+    Frobenius-norm projection \eqref{eq:proj_step} onto the compact set $\mathcal{K}$.
+    We evaluate four configurations: \emph{Fixed~+~No~Proj},
+    \emph{Fixed~+~Proj}, \emph{Barrier~+~No~Proj}, and
+    \emph{Barrier~+~Proj} at $d=20$ (SF4) and report SHD, F1,
+    $\Ldata$, and $h(\bbW)$ in Table~\ref{tab:exp2}.
+    % and the number of infeasible gradient steps
+    %  \sms{do we have the number of steps in the table?}.
+    
+    Without projection, both step-size rules produce nearly identical results with large acyclicity violations, since the unconstrained iterate drifts away from the feasible set regardless of how the step size is chosen.
+    Projection alone substantially improves structural recovery by keeping $\bbW$ within $\ccalK$. Combining
+    projection with the barrier-aware step size improves performance
+    further, with lower SHD, higher F1, and reduced $h(\bbW)$. The
+    slightly higher $\Ldata$ for \emph{Barrier~+~Proj} reflects the barrier
+    rule trading data fit for acyclicity, confirming that both mechanisms
+    are necessary for well-structured recovery.
+    % \sms{maybe bold Table 2 too?}
+    
+    \begin{table}[ht]
+      \centering
+      \caption{Experiment~2: effect of barrier step and projection
+               ($d=20$, SF4).}
+      \label{tab:exp2}
+      \scriptsize
+      \setlength{\tabcolsep}{2pt}
+      \renewcommand{\arraystretch}{0.95}
+      \begin{tabular}{lccccr}
+        \toprule
+        Config. & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$ \\
+        \midrule
+        Fixed, No Proj   & $162.9\pm9.6$  & $5.30\pm0.07$  & $\mathbf{0.002}\pm0.00$ & $0.300\pm0.03$ \\
+        Barrier, No Proj & $161.7\pm8.2$  & $5.39\pm0.06$  & $\mathbf{0.002}\pm0.00$ & $0.298\pm0.03$ \\
+        Fixed, Proj      & $139.0\pm5.7$  & $0.23\pm0.04$  & $1.330\pm0.26$          & $0.326\pm0.04$ \\
+        Barrier, Proj    & ${\mathbf{135.2}\pm8.2}$ & ${\mathbf{0.15}\pm0.04}$ & ${1.569\pm0.30}$ & ${\mathbf{0.345}\pm0.04}$ \\
+        \bottomrule
+      \end{tabular}
+    \end{table}
+
+    
+    % %% ------------------------------------------------------------
+    % \subsection{Experiment 3: Residual-based noise schedule}
+    % \label{ssec:exp3}
+
+    % \blue{[ali: Now that we are not using noise scheduler, we can remove this experiment and keep experiment 4.]}
+    
+    % We compare three noise schedule strategies: (i) Residual~(~eq.~\eqref{eq:noise_schedule}~), which couples $\hat{\sigma}_k$ to the normalised
+    % SEM fit error; (ii) {Fixed-high} ($\sigma_k \equiv 1.0$); and (iii) {Fixed-low} ($\sigma_k \equiv 0.01$).
+    % Results are reported in Table~\ref{tab:exp3}.
+
+    % The three schedules produce comparable results, with differences within
+    % one standard deviation across both metrics. Fixed-high achieves the
+    % lowest SHD ($130.4$) while Fixed-low achieves the highest F1 ($0.361$),
+    % suggesting a trade-off between false positives and false negatives
+    % rather than a clear winner. The residual schedule occupies a middle
+    % ground, avoiding the extremes of either fixed level without
+    % decisively outperforming them. 
+
+    % \begin{table}[h]
+    %   \centering
+    %   \caption{Experiment~3: noise schedule ablation (SF4).}
+    %   \label{tab:exp3}
+    %   \scriptsize
+    %   \setlength{\tabcolsep}{1.5pt}
+    %   \renewcommand{\arraystretch}{0.95}
+    %   \begin{tabular}{lccc}
+    %     \toprule
+    %     Metric & Fixed-low & Residual & Fixed-high \\
+    %     \midrule
+    %     SHD & $136.7{\tiny \pm8.1}$ & $134.6{\tiny \pm6.0}$ & $130.4{\tiny \pm9.7}$ \\
+    %     F1  & $0.361{\tiny \pm0.03}$ & $0.35{\tiny \pm0.02}$ & $0.33{\tiny \pm0.04}$ \\
+    %     \bottomrule
+    %   \end{tabular}
+    % \end{table}
+
+    
+    %% ------------------------------------------------------------
+    \subsection{Experiment 3: Sensitivity to sample size}
+    \label{ssec:exp3}
+    %% ------------------------------------------------------------
+    
+    We fix $d = 20$ (SF4) and vary the sample size over
+    $n \in \{1{\times}d,\, 5{\times}d,\, 10{\times}d\}$ to assess how the benefit of the diffusion prior changes with data availability.
+    Table~\ref{tab:exp3} reports SHD and F1 for DAG-PnP (PnP), DAGMA (DG),
+    and NOTEARS (NT) at each ratio $n/d$.
+    In the low-data regime ($n/d = 1$), DAG-PnP achieves a 
+    % notably 
+    higher F1 with a lower SHD than both baselines, confirming that the diffusion prior compensates for data scarcity by steering the optimizer toward plausible graph structures.
+    As $n$ grows, the data likelihood becomes increasingly informative and all three methods converge to comparable performance, with differences in SHD and F1 becoming negligible by $n/d = 10$. 
+    
+\begin{table}[ht]
+  \centering
+  \caption{Experiment~3: effect of sample size ($d=20$, SF4).}
+  \label{tab:exp3}
+  \tiny
+  \setlength{\tabcolsep}{1.2pt}
+  \renewcommand{\arraystretch}{0.9}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{lcccccc}
+    \toprule
+    & \multicolumn{2}{c}{$1$} & \multicolumn{2}{c}{$5$} & \multicolumn{2}{c}{$10$} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+    Method & SHD & F1 & SHD & F1 & SHD & F1 \\
+    \midrule
+    NT  & $145.1{\scriptscriptstyle \pm10.3}$ & $0.326{\scriptscriptstyle \pm0.04}$ & $98.5{\scriptscriptstyle \pm9.1}$ & ${0.530}{\scriptscriptstyle \pm0.03}$ & $79.5{\scriptscriptstyle \pm7.8}$ & ${0.604}{\scriptscriptstyle \pm0.03}$ \\
+    DG  & $147.1{\scriptscriptstyle \pm9.3}$ & $0.269{\scriptscriptstyle \pm0.04}$ & $97.7{\scriptscriptstyle \pm8.8}$ & ${0.530}{\scriptscriptstyle \pm0.03}$ & $79.0{\scriptscriptstyle \pm7.8}$ & ${0.606}{\scriptscriptstyle \pm0.03}$ \\
+    PnP & $\mathbf{135.2}{\scriptscriptstyle \pm8.2}$ & $\mathbf{0.345}{\scriptscriptstyle \pm0.04}$ & $\mathbf{96.5}{\scriptscriptstyle \pm8.4}$ & $\mathbf{0.533}{\scriptscriptstyle \pm0.03}$ & $\mathbf{77.1}{\scriptscriptstyle \pm7.9}$ & $\mathbf{0.610}{\scriptscriptstyle \pm0.03}$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+    \subsection{Experiment 4: Real-world data}
+    \label{ssec:exp4}
+    
+    We evaluate DAG-PnP on the Sachs~\cite{sachs2005causal} protein
+    signalling dataset ($d=11$, $n=853$), a standard benchmark for causal
+    discovery with a partially known ground-truth DAG of 17 edges.
+    Following standard preprocessing~\cite{zheng2018dags}, we use the
+    continuous observational subset.
+    Results are reported in Table~\ref{tab:exp4}.
+    
+    DAG-PnP achieves the highest F1 and the lowest SHD among
+    continuous optimization methods, demonstrating that the diffusion prior improves structural recovery on real data. The higher fit error of DAG-PnP reflects the prior's
+    regularizing effect: rather than overfitting to the data likelihood, the denoiser biases the solution toward structurally plausible graphs at the cost of a larger residual. 
+    % Greedy-BIC achieves the lowest SHD overall ($23.0$) by construction — its score-based search directly minimizes a penalized regression criterion — but produces a lower F1 than DAG-PnP, indicating it recovers fewer true edges despite fewer spurious ones.
+\begin{table}[ht]
+  \centering
+  \caption{Experiment~4: Sachs protein network.}
+  \label{tab:exp4}
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \renewcommand{\arraystretch}{0.95}
+  \begin{tabular}{lcccc}
+    \toprule
+    Method & SHD$\downarrow$ & $h(\bbW)\downarrow$ & Fit$\downarrow$ & F1$\uparrow$ \\
+    \midrule
+    Greedy-BIC & $\mathbf{23.0} \pm 0.0$ & $\mathbf{0.00} \pm 0.00$ & $1.91 \pm 0.00$ & $0.26 \pm 0.00$ \\
+    NOTEARS    & $44.9 \pm 4.7$ & $0.002 \pm 0.000$ & $\mathbf{0.98} \pm 0.02$ & $0.31 \pm 0.05$ \\
+    DAGMA      & $29.4 \pm 1.5$ & $0.015 \pm 0.000$ & $2.19 \pm 0.30$ & $0.30 \pm 0.02$ \\
+    DAG-PnP     & $26.7 \pm 3.0$ & $0.019 \pm 0.003$ & $5.44 \pm 1.62$ & $\mathbf{0.45} \pm 0.03$ \\
+    % DAG-PnP     & $25.3 \pm 1.8$ & $0.018 \pm 0.006$ & $4.00 \pm 1.77$ & $\mathbf{0.42} \pm 0.03$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+	
+	%% ============================================================
+	\section{Conclusion}
+	\label{sec:conclusion}
+	%% ============================================================
+	
+	We introduced DAG-PnP, a novel plug-and-play framework for causal discovery from observational data that combines SEM data fidelity, a DAGMA acyclicity penalty, and a diffusion prior over weighted DAGs. The barrier-aware step-size rule handles the singular geometry of the DAGMA feasible region, and we established a local fixed-point convergence result for the resulting deterministic PnP map. Experiments corroborate that implicit regularization via learned diffusion priors leads to improved DAG recovery over explicit-only continuous optimization methods.
+	
+	Several limitations merit discussion. The convergence guarantee is local, applies to the fixed-$\sigma$ variant of DAG-PnP, and requires the denoiser to be sufficiently contractive; extending the theory to the adaptive noise schedule and deriving verifiable contraction conditions from the SEM and denoiser properties are open problems. The diffusion model must be trained on a graph family relevant to the target problem, and our formulation addresses linear SEMs only. Future directions in our research agenda include extending DAG-PnP to nonlinear SEMs, designing feasibility-preserving denoisers that map into $\ccalW_s$ by construction, and developing a stronger global convergence theory.
+	
+	\bibliographystyle{IEEEtran}
+	\bibliography{refs}
+
+    %\begin{appendices}
+    \appendices
+
+    %\section{Proofs}
+
+    \section{Proof of Lemma~\ref{lem:feasibility}}
+    \label{app:proof_lem_feasibility}
+    \begin{IEEEproof}
+		Let $\bbG = \nabla \Lext(\bbW)$ and consider the affine perturbation $\bbZ = \bbW - \gamma \bbG$. We must show that the matrix $\bbA(\bbZ) = s\bbI - \bbZ \circ \bbZ$ has strictly positive determinant, ensuring $\bbZ$ remains in $\ccalW_s$.
+		
+		By the Eckart-Young-Mirsky theorem (which holds for any matrix under the spectral norm, including the asymmetric matrices arising here since $\bbW$ is the adjacency matrix of a directed graph), the distance in the spectral norm from $\bbA(\bbW)$ to the nearest singular matrix is exactly its smallest singular value, $s_{\min}(\bbA(\bbW)) = \delta(\bbW)$. Therefore, $\bbZ \in \ccalW_s$ is guaranteed if the perturbation satisfies $\|\bbA(\bbZ) - \bbA(\bbW)\|_2 < \delta(\bbW)$.
+		
+		Expanding the difference yields
+        %
+		\begin{equation}
+			\bbA(\bbZ) - \bbA(\bbW) = \gamma(\bbW \circ \bbG + \bbG \circ \bbW) - \gamma^2 \bbG \circ \bbG.
+		\end{equation}
+        %
+		For the linear term, we bound $\|\bbW \circ \bbG\|_F \leq \|\bbW\|_F \|\bbG\|_F$. To see this, note that $\|\bbW \circ \bbG\|_F^2 = \sum_{ij} W_{ij}^2 G_{ij}^2 \leq (\max_{ij} W_{ij}^2) \sum_{ij} G_{ij}^2 \leq (\sum_{ij} W_{ij}^2)(\sum_{ij} G_{ij}^2) = \|\bbW\|_F^2 \|\bbG\|_F^2$, where the final inequality uses $\max_{ij} W_{ij}^2 \leq \sum_{ij} W_{ij}^2$. For the quadratic term, the spectral norm of the Hadamard product satisfies $\|\bbG \circ \bbG\|_2 \leq \|\bbG \circ \bbG\|_F \leq \|\bbG\|_F^2$, where the first inequality is the standard spectral-to-Frobenius norm bound and the second follows from the same Hadamard product inequality applied with both arguments equal to $\bbG$. Applying the triangle inequality, we have
+        %
+		\begin{equation}
+			\|\bbA(\bbZ) - \bbA(\bbW)\|_2 \leq 2\gamma \|\bbW\|_F \|\bbG\|_F + \gamma^2 \|\bbG\|_F^2.
+		\end{equation}
+        %
+			If $\|\bbG\|_F = 0$, then $\bbZ = \bbW$ and the claim is immediate; hence assume $\|\bbG\|_F > 0$. Because the $\min$ operator in~\eqref{eq:step_size} enforces the strict upper bound $\gamma \leq c \frac{\delta(\bbW)}{\|\bbG\|_F + \epsilon} \leq c \frac{\delta(\bbW)}{\|\bbG\|_F}$ (since $\epsilon > 0$, regardless of which branch attains the minimum), we can substitute this bound alongside $\|\bbW\|_F \leq W_{\max}$ to yield
+        %
+		\begin{align}
+			\|\bbA(\bbZ) - \bbA(\bbW)\|_2 &\leq 2 \left(c \frac{\delta(\bbW)}{\|\bbG\|_F}\right) W_{\max} \|\bbG\|_F \notag \\
+			&\quad + \left(c \frac{\delta(\bbW)}{\|\bbG\|_F}\right)^2 \|\bbG\|_F^2 \notag \\
+			&= 2c \delta(\bbW) W_{\max} + c^2 \delta(\bbW)^2.
+		\end{align}
+        %
+		Since $\delta(\bbW) = s_{\min}(s\bbI - \bbW \circ \bbW) \leq \|s\bbI - \bbW \circ \bbW\|_2 \leq s + \|\bbW \circ \bbW\|_F \leq s + \|\bbW\|_F^2 \leq s + W_{\max}^2$, we obtain
+		%
+		\begin{equation}
+			\|\bbA(\bbZ) - \bbA(\bbW)\|_2 \leq \delta(\bbW)\left( 2c W_{\max} + c^2 (s + W_{\max}^2) \right).
+		\end{equation}
+		%
+		By our parameterization of $c$, $2c W_{\max} + c^2 (s + W_{\max}^2) < 1$. Thus, $\|\bbA(\bbZ) - \bbA(\bbW)\|_2 < \delta(\bbW) = s_{\min}(\bbA(\bbW))$. By the Eckart--Young--Mirsky theorem, this implies $\bbA(\bbZ)$ is non-singular. To conclude that $\bbZ \in \ccalW_s$, we additionally need $\det(\bbA(\bbZ)) > 0$ (not merely $\neq 0$). Since $\bbW \in \ccalK \subset \ccalW_s$, we have $\det(\bbA(\bbW)) > 0$. The linear path $t \mapsto \bbA(\bbW) + t(\bbA(\bbZ) - \bbA(\bbW))$ for $t \in [0,1]$ satisfies $\|t(\bbA(\bbZ) - \bbA(\bbW))\|_2 < \delta(\bbW)$ for all $t$, so every matrix along this path is non-singular by the same Eckart--Young--Mirsky argument. Because the determinant is continuous and non-vanishing along this path, it cannot change sign, yielding $\det(\bbA(\bbZ)) > 0$ and hence $\bbZ \in \ccalW_s$.
+	\end{IEEEproof}
+
+    \section{Proof of Theorem~\ref{thm:convergence}}
+    \label{app:proof_thm}
+
+	\begin{IEEEproof}
+		By Assumption~A1, the algorithm operates sufficiently far away from the boundary within $\ccalU$ such that the step size evaluates strictly to $\gamma_k = \eta$. Therefore, within this local neighborhood, the iteration map is exactly $T_\sigma(\bbW) = \Pi_{\ccalK}(D_\sigma(\bbW - \eta \nabla \Lext(\bbW)))$. Assumption~A1 further establishes that $T_\sigma$ maps the closed neighborhood $\ccalU$ into itself, $T_\sigma(\ccalU) \subseteq \ccalU$. Thus, for an iterate entering $\ccalU$, the entire subsequent sequence generated by $T_\sigma$ remains within $\ccalU$.
+
+		The space of real matrices $\reals^{d \times d}$ equipped with the Frobenius norm is a complete metric space. Because $\ccalU$ is a closed subset of a complete metric space, it is also complete. By Assumption~A1, $T_\sigma$ is a strict contraction on $\ccalU$. By the Banach Fixed-Point Theorem, any strict contraction on a non-empty complete metric space admits a unique fixed point. Therefore, there exists a unique $\bbW^\star \in \ccalU$ such that $T_\sigma(\bbW^\star) = \bbW^\star$.
+		
+		Applying the contraction property recursively yields
+		%
+        \begin{align*}
+			\|\bbW^{(k)} - \bbW^\star\|_F ={} & \|T_\sigma(\bbW^{(k-1)}) - T_\sigma(\bbW^\star)\|_F\\
+            \leq {} & \rho \|\bbW^{(k-1)} - \bbW^\star\|_F.
+		\end{align*}
+        %
+		Repeating this inequality for $k$ iterations yields $\|\bbW^{(k)} - \bbW^\star\|_F \leq \rho^k \|\bbW^{(0)} - \bbW^\star\|_F$. Since $\rho < 1$, the sequence geometrically converges as $\lim_{k \to \infty} \rho^k = 0$, guaranteeing local convergence to the fixed point $\bbW^\star$.
+	\end{IEEEproof}
+	
+
+%    \end{appendices}
+\end{document}

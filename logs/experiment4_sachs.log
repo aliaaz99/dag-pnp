@@ -1,0 +1,86 @@
+nohup: ignoring input
+  [sachs] INT=8 rows: 600/5400
+  [sachs] loaded X: shape=(600, 11)  n=600  d=11
+
+=================================================================
+  Experiment 4 – Sachs protein network
+  d=11  n=600  true edges=17  runs=10
+  s=4.00  W_max=8.17  threshold=adaptive
+=================================================================
+
+  Run 1/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=40  F1=0.375
+    DAGMA       SHD=32  F1=0.238
+    DAG-PnP     SHD=29  F1=0.408
+
+  Run 2/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=38  F1=0.387
+    DAGMA       SHD=34  F1=0.227
+    DAG-PnP     SHD=26  F1=0.381
+
+  Run 3/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=45  F1=0.308
+    DAGMA       SHD=34  F1=0.227
+    DAG-PnP     SHD=27  F1=0.400
+
+  Run 4/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=46  F1=0.281
+    DAGMA       SHD=35  F1=0.222
+    DAG-PnP     SHD=28  F1=0.417
+
+  Run 5/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=40  F1=0.355
+    DAGMA       SHD=33  F1=0.233
+    DAG-PnP     SHD=24  F1=0.429
+
+  Run 6/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=44  F1=0.290
+    DAGMA       SHD=33  F1=0.233
+    DAG-PnP     SHD=27  F1=0.372
+
+  Run 7/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=55  F1=0.225
+    DAGMA       SHD=32  F1=0.238
+    DAG-PnP     SHD=28  F1=0.364
+
+  Run 8/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=49  F1=0.310
+    DAGMA       SHD=35  F1=0.222
+    DAG-PnP     SHD=25  F1=0.468
+
+  Run 9/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=47  F1=0.299
+    DAGMA       SHD=34  F1=0.227
+    DAG-PnP     SHD=28  F1=0.364
+
+  Run 10/10
+    Greedy-BIC  SHD=23  F1=0.258
+    NOTEARS     SHD=45  F1=0.308
+    DAGMA       SHD=35  F1=0.222
+    DAG-PnP     SHD=27  F1=0.400
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Sachs  d=11  n=600  true edges=17
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Method                          SHD ↓                h(W) ↓             Fit err ↓           Fit ratio ↓                  F1 ↑
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Greedy-BIC        23.000 ± 0.000       0.000 ± 0.000       1.909 ± 0.000       0.036 ± 0.000       0.258 ± 0.000   
+NOTEARS           44.900 ± 4.700       0.002 ± 0.000       0.981 ± 0.015       0.019 ± 0.000       0.314 ± 0.045   
+DAGMA             33.700 ± 1.100       0.016 ± 0.000       2.159 ± 0.232       0.041 ± 0.004       0.229 ± 0.006   
+DAG-PnP           26.900 ± 1.446       0.016 ± 0.003       3.753 ± 1.771       0.072 ± 0.034       0.400 ± 0.031   
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  Results  → results/exp4_sachs_results.csv
+  LaTeX    → results/exp4_sachs_summary.tex
+  [plot] saved → results/exp4_sachs_groundtruth_dag.png
+  DAG plot → results/exp4_sachs_groundtruth_dag.png

@@ -23,7 +23,7 @@ from collections import defaultdict
 from typing import Dict, List
 
 from data_utils import random_dag, sample_sem, evaluate_dag, to_tensor, scale_free_dag
-from dag_pnp import dag_pnp, IdentityDenoiser
+from dag_pnp import dag_pnp, IdentityDenoiser, GDSSDiffusionDenoiser
 from baselines import dag_pnp_fixed_step
 from losses_dag import data_loss, dagma_penalty
 from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, NORMALISE, get_threshold
@@ -32,8 +32,8 @@ from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, NORMALIS
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_VALUES  = [50]
-N_SAMPLES = 500
+D_VALUES  = [20]
+N_SAMPLES = 20
 NUM_SEEDS = 10
 SF_M      = K_EDGES
 
@@ -62,11 +62,12 @@ def _run_config(X, denoiser, step_type, project, kw):
             X, denoiser,
             fixed_eta=kw["eta"],
             project=project,
+            denoise_every = 10,
             **kw,
         )
         infeasible = int(sum(hist["infeasible_steps"]))
     else:  # barrier
-        W, _ = dag_pnp(X, denoiser, verbose=False, project=project, **kw)
+        W, _ = dag_pnp(X, denoiser, verbose=False, project=project, denoise_every=10, **kw)
         infeasible = 0   # guaranteed by Lemma 1
 
     return W.detach().numpy(), infeasible
@@ -153,6 +154,13 @@ def _latex_table(all_summary):
 # ===========================================================================
 # Main experiment
 # ===========================================================================
+def get_denoiser():
+    return GDSSDiffusionDenoiser.from_checkpoint(
+        ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth",
+        device="cpu",
+    )
+
+
 def run_experiment2(save_dir: str = "results", normalise: bool = NORMALISE):  # False overrides NORMALISE: barrier must stay active
     """
     normalise=False (default): run on raw X so that the barrier mechanism is
@@ -161,7 +169,7 @@ def run_experiment2(save_dir: str = "results", normalise: bool = NORMALISE):  # 
     boundary, so the barrier-aware and fixed-step methods become identical).
     """
     os.makedirs(save_dir, exist_ok=True)
-    denoiser = IdentityDenoiser()
+    denoiser = get_denoiser()
 
     rows_raw: List[Dict] = []
     all_summary: Dict[int, Dict] = {}
@@ -182,11 +190,8 @@ def run_experiment2(save_dir: str = "results", normalise: bool = NORMALISE):  # 
 
         for seed in range(NUM_SEEDS):
             rng    = seed * 100
-            W_true = random_dag(d, k=K_EDGES, weight_low=WEIGHT_LOW,
-                                weight_high=WEIGHT_HIGH, seed=rng)
-            # To use SF instead, comment out above and uncomment:
-            # W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
-            #                         weight_high=WEIGHT_HIGH, seed=rng)
+            W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
+                                    weight_high=WEIGHT_HIGH, seed=rng)
             X_np = sample_sem(W_true, N_SAMPLES, seed=rng + 1)
             X    = to_tensor(X_np)
 

@@ -181,6 +181,9 @@ def evaluate_dag(
     tp = int(np.sum((B_pred == 1) & (B_true == 1)))
     fp = int(np.sum((B_pred == 1) & (B_true == 0)))
     fn = int(np.sum((B_pred == 0) & (B_true == 1)))
+    # tn: off-diagonal entries that are correctly absent
+    d  = B_pred.shape[0]
+    tn = int(d * (d - 1) - tp - fp - fn)
 
     shd = fp + fn   # each wrong or missing directed edge counts once
 
@@ -188,6 +191,7 @@ def evaluate_dag(
     precision = tp / (tp + fp + 1e-9)
     fdr       = fp / (tp + fp + 1e-9)
     f1        = 2 * precision * tpr / (precision + tpr + 1e-9)
+    accuracy  = (tp + tn) / (tp + tn + fp + fn + 1e-9)
 
     return {
         "shd":       shd,
@@ -195,9 +199,11 @@ def evaluate_dag(
         "fdr":       float(fdr),
         "precision": float(precision),
         "f1":        float(f1),
+        "accuracy":  float(accuracy),
         "tp":        tp,
         "fp":        fp,
         "fn":        fn,
+        "tn":        tn,
     }
 
 

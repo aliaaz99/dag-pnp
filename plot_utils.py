@@ -77,8 +77,10 @@ def print_results_table(
         "fit_error":       "Fit err ↓",
         "fit_error_ratio": "Fit ratio ↓",
         "f1":              "F1 ↑",
-        "tpr":        "TPR ↑",
-        "fdr":        "FDR ↓",
+        "tpr":             "Recall ↑",
+        "precision":       "Precision ↑",
+        "accuracy":        "Accuracy ↑",
+        "fdr":             "FDR ↓",
     }
     header = f"{'Method':<22}" + "".join(
         f"{labels.get(m, m.upper()):>{col_w}}" for m in metrics
@@ -317,7 +319,7 @@ def plot_experiment4(
         ("f1",  r"F1   $\uparrow$",    "F1 (higher is better)"),
     ]
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3))
 
     for ax, (metric, ylabel, title) in zip(axes, metric_cfg):
         for key, metric_dict in results.items():

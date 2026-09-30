@@ -49,7 +49,7 @@ THRESHOLD   = 0.2  # used when ADAPTIVE_THRESHOLD = False; default = WEIGHT_LOW 
 
 # ── threshold selection ───────────────────────────────────────────────────────
 # True  : threshold = mean of all off-diagonal |W[i,j]| in the estimated matrix.
-ADAPTIVE_THRESHOLD = False
+ADAPTIVE_THRESHOLD = True
 
 
 def get_threshold(W_np=None) -> float:
@@ -71,12 +71,12 @@ def get_threshold(W_np=None) -> float:
 
 # ── normalisation ─────────────────────────────────────────────────────────────
 # True  : divide X by per-column std before optimisation, recover original-scale W
-NORMALISE   = False
+NORMALISE   = True
 
 # ── fixed hyperparameters (same for all d) ───────────────────────────────────
 LAMBDA_DATA = 1.0
-LAMBDA_DAG  = 0.02  
-ETA         = 0.005
+LAMBDA_DAG  = 0.01
+ETA         = 0.1
 C           = 0.3
 EPSILON     = 1e-6
 ALPHA       = 1.0

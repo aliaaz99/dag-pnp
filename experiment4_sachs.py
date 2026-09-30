@@ -38,18 +38,23 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from data_utils import evaluate_dag, to_tensor, normalise_X, denormalise_W
-from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser
+from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser, GDSSDiffusionDenoiser
 from baselines import dagma_baseline, notears_baseline, graph_gen_baseline
 from losses_dag import data_loss, dagma_penalty
 from dag_config import shared_kwargs, THRESHOLD, NORMALISE, ADAPTIVE_THRESHOLD, get_threshold
 
-
+NORMALISE = False # hardcoded to False
 # ===========================================================================
 # !! PLUG IN YOUR DENOISER HERE !!
 # ===========================================================================
 def get_denoiser():
-    return IdentityDenoiser()   # <-- replace with trained denoiser
-    # return GaussianShrinkageDenoiser(prior_std=0.75)
+    # Checkpoint was trained on SF d=20; GNN architecture handles d=11 at
+    # reduced fidelity. Replace with a d=11-specific checkpoint if available.
+    return GDSSDiffusionDenoiser.from_checkpoint(
+        # ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth", # for SF
+        ckpt_path="gdss/checkpoints/sem_ER_d20/Apr18-21_02_13.pth", # for ER
+        device="cpu",
+    )
 
 
 # ===========================================================================
@@ -378,11 +383,9 @@ def run_experiment4(save_dir: str = "results", data_dir: str = "data",
               f"F1={raw['DAGMA']['f1'][-1]:.3f}")
 
         # ---- DAG-PnP ----
-        # W_p, _ = dag_pnp(X_opt, denoiser, verbose=False, W_init=W_init, **kw)
-        # for k, v in _record(W_p.detach().numpy()).items():
-        #     raw["DAG-PnP"][k].append(v)
-        # Placeholder until real denoiser is available — reuse DAGMA result:
-        for k, v in _record(W_d).items():
+        W_p, _ = dag_pnp(X_opt, denoiser, inject_noise=True, verbose=False, lambda_l1=0.005,
+                         W_init=W_init, **kw)
+        for k, v in _record(W_p.detach().numpy()).items():
             raw["DAG-PnP"][k].append(v)
         print(f"    DAG-PnP     SHD={raw['DAG-PnP']['shd'][-1]:.0f}  "
               f"F1={raw['DAG-PnP']['f1'][-1]:.3f}")

@@ -14,6 +14,7 @@ identical (IdentityDenoiser).  Swap get_denoiser() for your trained model.
 """
 
 import os
+import time
 import numpy as np
 import torch
 from collections import defaultdict
@@ -38,19 +39,19 @@ from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, NORMALIS
 
 def get_denoiser():
     return GDSSDiffusionDenoiser.from_checkpoint(
-        ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth",
+        ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth", # for SF
+        # ckpt_path="gdss/checkpoints/sem_ER_d20/Apr18-21_02_13.pth", # for ER
         device="cpu",   # or "cuda:0" if you have a GPU
     )
 
 # ===========================================================================
 # Configuration
 # ===========================================================================
-D_VALUES  = [20]
-N_SAMPLES = 500
+D_VALUES  = [20] # 50
 SF_M      = K_EDGES
-NUM_SEEDS = 1
+NUM_SEEDS = 10
 
-METRICS = ["shd", "acyclicity", "fit_error", "fit_error_ratio", "f1"]
+METRICS = ["shd", "f1", "tpr", "precision", "acyclicity", "fit_error"]
 
 
 # ===========================================================================
@@ -94,6 +95,7 @@ def _save_csv(raw: Dict, d: int, graph_family: str, save_dir: str):
 def run_one_setting(d, n, graph_family, denoiser, save_dir, normalise=True):
     methods = ["NOTEARS", "DAGMA", "Greedy-BIC", "DAG-PnP"]
     raw: Dict = {m: defaultdict(list) for m in methods}
+    times: Dict = {m: [] for m in methods}
 
     # d-adaptive kwargs — key fix
     kw = shared_kwargs(d)
@@ -130,23 +132,31 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir, normalise=True):
                 raw[method_name][k].append(v)
 
         # ---- NOTEARS ----
+        t0 = time.perf_counter()
         W_n_norm, _ = notears_baseline(
             X_opt, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"],
-            num_iters=kw["num_iters"], lr=0.001,
-            W_max=kw["W_max"], grad_clip=10.0,
+            num_iters=kw["num_iters"], lr=kw["eta"],
+            W_max=kw["W_max"], # grad_clip=10.0,
         )
+        times["NOTEARS"].append(time.perf_counter() - t0)
         _record("NOTEARS", W_n_norm)
 
         # ---- DAGMA ----
+        t0 = time.perf_counter()
         W_d_norm, _ = dagma_baseline(X_opt, **kw)
+        times["DAGMA"].append(time.perf_counter() - t0)
         _record("DAGMA", W_d_norm)
 
         # ---- Greedy-BIC ----
+        t0 = time.perf_counter()
         W_g, _ = graph_gen_baseline(X_opt, max_parents=min(5, d // 2))
+        times["Greedy-BIC"].append(time.perf_counter() - t0)
         _record("Greedy-BIC", W_g) # placeholder: reuse DAGMA
 
         # ---- DAG-PnP ----
-        W_p, _ = dag_pnp(X_opt, denoiser, inject_noise=True, verbose=True, **kw)
+        t0 = time.perf_counter()
+        W_p, _ = dag_pnp(X_opt, denoiser, inject_noise=True, verbose=False, lambda_l1=0.000,**kw)
+        times["DAG-PnP"].append(time.perf_counter() - t0)
         _record("DAG-PnP", W_p.detach().numpy())
         # _record("DAG-PnP", W_p)      # placeholder: reuse DAGMA
 
@@ -163,6 +173,15 @@ def run_one_setting(d, n, graph_family, denoiser, save_dir, normalise=True):
     print_results_table(summary, d=d, n=n, graph_type=graph_family,
                         metrics=METRICS)
 
+    print(f"\n  Runtime (seconds)   d={d}   seeds={NUM_SEEDS}")
+    print("  " + "─" * 44)
+    print(f"  {'Method':<14}  {'Mean (s)':>10}  {'Std (s)':>10}")
+    print("  " + "─" * 44)
+    for m in methods:
+        t_arr = times[m]
+        print(f"  {m:<14}  {np.mean(t_arr):>10.3f}  {np.std(t_arr):>10.3f}")
+    print("  " + "─" * 44)
+
     csv_path = _save_csv(raw, d, graph_family, save_dir)
     print(f"  Raw results saved → {csv_path}\n")
 
@@ -174,9 +193,9 @@ def run_experiment1(save_dir: str = "results", normalise: bool = NORMALISE):
     for graph_family in ["SF"]:
         for d in D_VALUES:
             print(f"\n{'='*60}")
-            print(f"  {graph_family} graph   d={d}   n={N_SAMPLES}   seeds={NUM_SEEDS}")
+            print(f"  {graph_family} graph   d={d}   n={d}   seeds={NUM_SEEDS}")
             print(f"{'='*60}")
-            run_one_setting(d, N_SAMPLES, graph_family, denoiser, save_dir,
+            run_one_setting(d, d, graph_family, denoiser, save_dir,
                             normalise=normalise)
 
 

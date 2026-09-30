@@ -21,23 +21,20 @@ from collections import defaultdict
 from typing import Dict
 
 from data_utils import random_dag, sample_sem, evaluate_dag, to_tensor, scale_free_dag
-from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser
+from dag_pnp import dag_pnp, IdentityDenoiser, GaussianShrinkageDenoiser, GDSSDiffusionDenoiser
 from baselines import dagma_baseline, notears_baseline
 from plot_utils import plot_experiment4
-from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, THRESHOLD
+from dag_config import shared_kwargs, K_EDGES, WEIGHT_LOW, WEIGHT_HIGH, get_threshold
 
 
 # ===========================================================================
 # !! PLUG IN YOUR DENOISER HERE !!
 # ===========================================================================
 def get_denoiser():
-    """
-    Return a trained diffusion denoiser.  Replace with, e.g.:
-        from my_denoiser import DiffusionDenoiser
-        return DiffusionDenoiser.load("checkpoints/dag_diffusion.pt")
-    """
-    return IdentityDenoiser()  # <-- ablation: no denoising
-    # return GaussianShrinkageDenoiser(prior_std=0.75)  # <-- replace with real denoiser
+    return GDSSDiffusionDenoiser.from_checkpoint(
+        ckpt_path="gdss/checkpoints/sem_SF_d20/Apr16-01:12:06.pth",
+        device="cpu",
+    )
 
 
 # ===========================================================================
@@ -47,8 +44,7 @@ D_VALUES  = [20]        # graph sizes to compare
 NUM_SEEDS = 10              # random seeds per n/d point
 
 # n/d ratios to sweep (x-axis of the plot)
-# Start at 2 — at n/d=1 the system X=XW+E is under-determined
-ND_RATIOS = [2, 5, 10, 25, 50]
+ND_RATIOS = [1, 5, 10]
 SF_M      = K_EDGES
 
 
@@ -94,54 +90,56 @@ def run_experiment4(save_dir: str = "results"):
         print(f"  Experiment 4: sample size sweep   d={d}   seeds={NUM_SEEDS}")
         print(f"  s={kw['s']:.2f}  W_max={kw['W_max']:.2f}")
         print(f"{'='*60}")
+        col = 20
         print(f"  {'n/d':>6}  {'n':>6}  " +
-              "  ".join(f"{m+' SHD':>12}" for m in methods))
-        print("  " + "─" * (10 + 14 * len(methods)))
+              "  ".join(f"{m+' SHD':>{col}}  {m+' F1':>{col}}" for m in methods))
+        print("  " + "─" * (14 + (col * 2 + 4) * len(methods)))
 
         for nd in ND_RATIOS:
             n         = int(nd * d)
             seed_shds = {m: [] for m in methods}
+            seed_f1s  = {m: [] for m in methods}
 
             for seed in range(NUM_SEEDS):
-                rng_offset = seed * 500
-                W_true = random_dag(d, k=K_EDGES, weight_low=WEIGHT_LOW,
-                                    weight_high=WEIGHT_HIGH, seed=rng_offset)
-                # To use SF ground truth instead, uncomment the next line and comment out above.
-                # W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
-                #                         weight_high=WEIGHT_HIGH, seed=rng_offset)
+                rng_offset = seed * 1000
+                W_true = scale_free_dag(d, m=SF_M, weight_low=WEIGHT_LOW,
+                                        weight_high=WEIGHT_HIGH, seed=rng_offset)
                 X_np = sample_sem(W_true, n, seed=rng_offset + 1)
                 X    = to_tensor(X_np)
 
                 # ---- NOTEARS ----
                 W_n, _ = notears_baseline(
                     X, lambda_data=kw["lambda_data"], lambda_dag=kw["lambda_dag"],
-                    num_iters=kw["num_iters"], lr=0.001,
-                    W_max=kw["W_max"], grad_clip=10.0,
+                    num_iters=kw["num_iters"], lr=kw["eta"],
+                    W_max=kw["W_max"], lambda_l1=0.0,
                 )
-                m_n = evaluate_dag(W_n, W_true, THRESHOLD)
+                m_n = evaluate_dag(W_n, W_true, get_threshold(W_n))
                 raw["NOTEARS"]["shd"][nd].append(m_n["shd"])
                 raw["NOTEARS"]["f1"][nd].append(m_n["f1"])
                 seed_shds["NOTEARS"].append(m_n["shd"])
+                seed_f1s["NOTEARS"].append(m_n["f1"])
 
                 # ---- DAGMA ----
                 W_d, _ = dagma_baseline(X, **kw)
-                m_d = evaluate_dag(W_d, W_true, THRESHOLD)
+                m_d = evaluate_dag(W_d, W_true, get_threshold(W_d))
                 raw["DAGMA"]["shd"][nd].append(m_d["shd"])
                 raw["DAGMA"]["f1"][nd].append(m_d["f1"])
                 seed_shds["DAGMA"].append(m_d["shd"])
+                seed_f1s["DAGMA"].append(m_d["f1"])
 
                 # ---- DAG-PnP ----
-                W_p, _ = dag_pnp(X, denoiser, verbose=False, **kw)
-                m_p = evaluate_dag(W_p.detach().numpy(), W_true, THRESHOLD)
+                W_p, _ = dag_pnp(X, denoiser, verbose=False, denoise_every=10, **kw)
+                m_p = evaluate_dag(W_p.detach().numpy(), W_true, get_threshold(W_p.detach().numpy()))
                 raw["DAG-PnP"]["shd"][nd].append(m_p["shd"])
                 raw["DAG-PnP"]["f1"][nd].append(m_p["f1"])
                 seed_shds["DAG-PnP"].append(m_p["shd"])
+                seed_f1s["DAG-PnP"].append(m_p["f1"])
 
             print(f"  {nd:>6}  {n:>6}  " + "  ".join(
-                f"{np.mean(seed_shds[m]):>8.2f} ± {np.std(seed_shds[m]):<4.2f}"
+                f"{np.mean(seed_shds[m]):>6.2f} ± {np.std(seed_shds[m]):<5.2f}"
+                f"  {np.mean(seed_f1s[m]):>6.3f} ± {np.std(seed_f1s[m]):<5.3f}"
                 for m in methods
             ))
-
     d = D_VALUES[0]
     plot_results = {
         style_map[m]: {

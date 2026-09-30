@@ -17,7 +17,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from dag_pnp import (
     dag_pnp, IdentityDenoiser,
-    _noise_schedule, _project_onto_K,
+    _noise_schedule, _project_onto_K, _barrier_step_size,
 )
 from losses_dag import grad_lext, data_loss, dagma_penalty
 from dag_config import THRESHOLD
@@ -49,10 +49,11 @@ def _notears_acyclicity_grad(W: np.ndarray) -> np.ndarray:
 def notears_baseline(
     X:           torch.Tensor,
     lambda_data: float = 1.0,
-    lambda_dag:  float = 0.02,   # reduced from 0.1; consistent with DAGMA experiments
+    lambda_dag:  float = 0.01,
+    lambda_l1:   float = 0.01,
     num_iters:   int   = 1000,
-    lr:          float = 0.001,
-    W_max:       float = 10.0,   # increased from 3.0; prevents over-clipping at d>=20
+    lr:          float = 0.005,
+    W_max:       float = 10.0,
     grad_clip:   float = 10.0,
     W_init:      Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict]:
@@ -68,6 +69,9 @@ def notears_baseline(
       - The combined gradient is clipped to grad_clip in Frobenius norm before
         the update, preventing single large steps from causing divergence.
       - NaN/inf entries in the acyclicity gradient are zeroed out.
+
+    lambda_l1 adds an L1 sparsity penalty lambda_l1 * ||W||_1 via its
+    subgradient sign(W).  Disabled by default (lambda_l1=0.0).
     """
     X_np = X.numpy() if isinstance(X, torch.Tensor) else np.array(X)
     n, d = X_np.shape
@@ -80,6 +84,8 @@ def notears_baseline(
         grad_data = -1.0 / n * (X_np.T @ residual)
         grad_h    = _notears_acyclicity_grad(W)
         grad      = lambda_data * grad_data + lambda_dag * grad_h
+        if lambda_l1 > 0.0:
+            grad = grad + lambda_l1 * np.sign(W)
 
         # Gradient clipping (Frobenius norm)
         g_norm = np.linalg.norm(grad, "fro")
@@ -113,7 +119,7 @@ def dagma_baseline(
     Equivalent to passing IdentityDenoiser to dag_pnp.
     All keyword arguments are forwarded to dag_pnp.
     """
-    W_est, history = dag_pnp(X, IdentityDenoiser(), inject_noise=False, verbose=True, **kwargs)
+    W_est, history = dag_pnp(X, IdentityDenoiser(), inject_noise=False, verbose=False, lambda_l1=0.005, **kwargs)
     return W_est.detach().numpy(), history
 
 
@@ -292,23 +298,25 @@ def dag_pnp_fixed_step(
     smooth_beta: float = 0.9,
     W_max:       float = 10.0,
     delta_min:   float = 1e-6,
-    # eta/c/epsilon are accepted so that **shared_kwargs(d) can be splatted
-    # directly into this function; they are ignored (fixed_eta is used instead).
+    # eta/c/epsilon accepted so **shared_kwargs(d) can be splatted; ignored here.
     eta:         float = 0.005,
     c:           float = 0.3,
     epsilon:     float = 1e-6,
     project:     bool  = True,
+    inject_noise: bool = True,
+    denoise_every: int = 5,
     W_init: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict]:
     """
     DAG-PnP with a constant step size (no barrier-aware adaptation).
 
-    Identical to Algorithm 1 except gamma_k = fixed_eta at every iteration.
+    Identical to dag_pnp except gamma_k = fixed_eta at every iteration.
+    Uses the same VP-SDE inline denoising path as dag_pnp when the denoiser
+    has a .sde attribute, so the only difference vs. the barrier variant is
+    the step-size rule.
+
     Also records whether each gradient substep left the feasible set W_s
     (before projection), so Experiment 2 can count feasibility violations.
-
-    Note: eta, c, epsilon are accepted but ignored so that the full
-    shared_kwargs(d) dict can be passed as **kwargs without a TypeError.
     """
     d      = X.shape[1]
     device = X.device
@@ -319,35 +327,62 @@ def dag_pnp_fixed_step(
     W = _project_onto_K(W, s, delta_min, W_max)
 
     history: Dict = {
-        "loss": [], "h": [], "sigma": [], "gamma": [],
-        # True at iteration k if the gradient step z = W - gamma*grad left W_s
+        "loss": [], "h": [], "sigma": [], "gamma": [], "denoiser_w": [],
         "infeasible_steps": [],
     }
     sigma_prev: Optional[float] = None
 
-    for _ in range(num_iters):
+    _has_sde = inject_noise and hasattr(denoiser, 'sde')
+    if _has_sde:
+        n_denoise_steps = (num_iters + denoise_every - 1) // denoise_every
+        t_vals = np.linspace(float(denoiser.sde.T), denoiser.t_min, n_denoise_steps)
+
+    for k in range(num_iters):
         grad  = grad_lext(X, W, lambda_data, lambda_dag, s)
-        gamma = fixed_eta                                   # fixed — no barrier rule
+        gamma = fixed_eta                               # fixed — no barrier rule
         z     = W - gamma * grad
 
-        # Check feasibility of gradient substep (before projection)
-        I  = torch.eye(d, device=device, dtype=dtype)
-        M  = s * I - z * z
+        # Track whether gradient substep left W_s (before projection)
+        I = torch.eye(d, device=device, dtype=dtype)
+        M = s * I - z * z
         sign, _ = torch.linalg.slogdet(M)
-        left_feasible = (sign.item() <= 0)                 # True = violated W_s
+        left_feasible = (sign.item() <= 0)
 
-        sigma_k = _noise_schedule(
-            X, W, alpha, sigma_min, sigma_max, sigma_prev, smooth_beta
-        )
-        sigma_prev = sigma_k
+        if k % denoise_every == 0:
+            if _has_sde:
+                t_k = torch.tensor([t_vals[k // denoise_every]], device=device, dtype=dtype)
+                z_b = z.unsqueeze(0)
+                mean_z, std_k = denoiser.sde.marginal_prob(z_b, t_k)
+                z_tilde = (mean_z + std_k.view(-1, 1, 1) * torch.randn_like(z_b)).squeeze(0)
+                sigma_k = std_k.item()
+                with torch.no_grad():
+                    t_d    = torch.tensor([t_vals[k // denoise_every]], device=denoiser.device, dtype=torch.float32)
+                    adj_t  = z_tilde.unsqueeze(0).to(denoiser.device, torch.float32)
+                    x_feat = torch.ones(1, d, denoiser.max_feat_num, device=denoiser.device)
+                    flags  = torch.ones(1, d, device=denoiser.device)
+                    mean_c, std_td = denoiser.sde.marginal_prob(torch.ones_like(adj_t), t_d)
+                    score  = denoiser.score_fn(x_feat, adj_t, flags, t_d)
+                    std_sq = (std_td ** 2).view(1, 1, 1)
+                    W_struct = ((adj_t + std_sq * score) / mean_c).squeeze(0).cpu().to(dtype)
+                denoiser_w = min((std_td / mean_c[0, 0, 0]).item(), 0.4)
+                W_tilde = (1.0 - denoiser_w) * z + denoiser_w * W_struct.to(device)
+            elif inject_noise:
+                sigma_k = _noise_schedule(X, W, alpha, sigma_min, sigma_max, sigma_prev, smooth_beta)
+                sigma_prev = sigma_k
+                W_tilde    = denoiser(z, sigma_k)
+                denoiser_w = 1.0
+            else:
+                sigma_k = 0.0; denoiser_w = 0.0; W_tilde = z
+        else:
+            sigma_k = 0.0; denoiser_w = 0.0; W_tilde = z
 
-        W_tilde = denoiser(z, sigma_k)
-        W = _project_onto_K(W_tilde, s, delta_min, W_max) if project else W_tilde.clone()
+        W = _project_onto_K(W_tilde, s, delta_min, W_max) if project else W_tilde
 
         history["loss"].append(data_loss(X, W).item())
         history["h"].append(dagma_penalty(W, s).item())
         history["sigma"].append(sigma_k)
         history["gamma"].append(gamma)
+        history["denoiser_w"].append(denoiser_w)
         history["infeasible_steps"].append(left_feasible)
 
     return W, history
@@ -370,13 +405,13 @@ def dag_pnp_fixed_sigma(
     s:           float = 1.0,
     W_max:       float = 10.0,
     delta_min:   float = 1e-6,
-    # alpha/sigma_min/sigma_max/smooth_beta are accepted so that
-    # **shared_kwargs(d) can be splatted directly; they are ignored because
-    # this function uses a fixed sigma instead of the residual schedule.
+    # alpha/sigma_min/sigma_max/smooth_beta accepted so **shared_kwargs(d) splats; ignored.
     alpha:       float = 1.0,
     sigma_min:   float = 0.01,
     sigma_max:   float = 0.5,
     smooth_beta: float = 0.9,
+    inject_noise: bool = True,
+    denoise_every: int = 10,
     W_init: Optional[torch.Tensor] = None,
     verbose:   bool = True,
     log_every: int  = 20,
@@ -384,19 +419,15 @@ def dag_pnp_fixed_sigma(
     """
     DAG-PnP with a constant denoiser noise level (no residual-based schedule).
 
-    Identical to Algorithm 1 except sigma_k = fixed_sigma at every iteration,
-    bypassing eq. (12).  Used in Experiment 3 to ablate the noise schedule.
+    Identical to dag_pnp except the noise level is held fixed at fixed_sigma
+    instead of using the residual-based annealing schedule (eq. 12).
+    Used in Experiment 3 to ablate the noise schedule.
 
-    Note: alpha, sigma_min, sigma_max, smooth_beta are accepted but ignored so
-    that the full shared_kwargs(d) dict can be passed as **kwargs without a
-    TypeError.
-
-    Args:
-        fixed_sigma: constant noise level passed to the denoiser every iteration.
-                     Typical choices: sigma_min (weak prior), sigma_max (strong
-                     prior), or an intermediate value.
+    For GDSSDiffusionDenoiser (.sde): fixed_sigma is mapped once to a fixed
+    diffusion time t via std(t) = fixed_sigma, and that t is used every
+    denoising call (no annealing).  The SNR-based mixing weight is therefore
+    also constant throughout.
     """
-    from dag_pnp import _barrier_step_size   # import here to avoid circular deps
     d      = X.shape[1]
     device = X.device
     dtype  = X.dtype
@@ -405,35 +436,61 @@ def dag_pnp_fixed_sigma(
          if W_init is None else W_init.clone())
     W = _project_onto_K(W, s, delta_min, W_max)
 
-    history: Dict = {"loss": [], "h": [], "sigma": [], "gamma": []}
+    history: Dict = {"loss": [], "h": [], "sigma": [], "gamma": [], "denoiser_w": []}
+
+    # Pre-compute fixed diffusion time for VP-SDE denoisers
+    _has_sde = inject_noise and hasattr(denoiser, 'sde')
+    if _has_sde:
+        t_fixed_val = denoiser._sigma_to_t(fixed_sigma)
+        t_fixed_dev = torch.tensor([t_fixed_val], device=device, dtype=dtype)
+        t_fixed_ddev = torch.tensor([t_fixed_val], device=denoiser.device, dtype=torch.float32)
+        # Pre-compute fixed SNR mixing weight
+        _dummy = torch.zeros(1, 1, 1, device=denoiser.device)
+        mean_c0, std_td0 = denoiser.sde.marginal_prob(torch.ones(1, 1, 1, device=denoiser.device), t_fixed_ddev)
+        _denoiser_w_fixed = min((std_td0 / mean_c0[0, 0, 0]).item(), 1.0)
 
     for k in range(num_iters):
         grad  = grad_lext(X, W, lambda_data, lambda_dag, s)
         gamma = _barrier_step_size(W, grad, s, eta, c, epsilon)
         z     = W - gamma * grad
 
-        # Fixed noise level — skip eq. (12)
-        # _alpha_k = 1 - fixed_sigma
-        # _eps      = torch.randn_like(z)
-        # z_noisy   = _alpha_k * z + (fixed_sigma) * _eps
-        # W_tilde = denoiser(z_noisy, fixed_sigma)
-        # W       = _project_onto_K(W_tilde, s, delta_min, W_max)
+        if k % denoise_every == 0:
+            if _has_sde:
+                # Renoise at fixed t
+                z_b = z.unsqueeze(0)
+                mean_z, std_k = denoiser.sde.marginal_prob(z_b, t_fixed_dev)
+                z_tilde = (mean_z + std_k.view(-1, 1, 1) * torch.randn_like(z_b)).squeeze(0)
+                sigma_k = std_k.item()
+                with torch.no_grad():
+                    adj_t  = z_tilde.unsqueeze(0).to(denoiser.device, torch.float32)
+                    x_feat = torch.ones(1, d, denoiser.max_feat_num, device=denoiser.device)
+                    flags  = torch.ones(1, d, device=denoiser.device)
+                    mean_c, std_td = denoiser.sde.marginal_prob(torch.ones_like(adj_t), t_fixed_ddev)
+                    score  = denoiser.score_fn(x_feat, adj_t, flags, t_fixed_ddev)
+                    std_sq = (std_td ** 2).view(1, 1, 1)
+                    W_struct = ((adj_t + std_sq * score) / mean_c).squeeze(0).cpu().to(dtype)
+                denoiser_w = _denoiser_w_fixed
+                W_tilde = (1.0 - denoiser_w) * z + denoiser_w * W_struct.to(device)
+            elif inject_noise:
+                W_tilde    = denoiser(z, fixed_sigma)
+                sigma_k    = fixed_sigma
+                denoiser_w = 1.0
+            else:
+                sigma_k = 0.0; denoiser_w = 0.0; W_tilde = z
+        else:
+            sigma_k = 0.0; denoiser_w = 0.0; W_tilde = z
 
-
-        z_binary  = (z.abs() > THRESHOLD).float() * z.sign()
-        # z_noisy   = _alpha_k * z_binary + sigma_k * _eps
-        W_struct  = denoiser(z_binary, fixed_sigma)   
-        # Use denoiser output only as structural mask, keep gradient's weights
-        W_tilde   = W_struct.sign() * z.abs()   # denoiser decides edges, gradient decides magnitudes
+        W = _project_onto_K(W_tilde, s, delta_min, W_max)
 
         history["loss"].append(data_loss(X, W).item())
         history["h"].append(dagma_penalty(W, s).item())
-        history["sigma"].append(fixed_sigma)
+        history["sigma"].append(sigma_k)
         history["gamma"].append(gamma)
+        history["denoiser_w"].append(denoiser_w)
+
         if verbose and (k % log_every == 0 or k == num_iters - 1):
-            print(f"Iter {k+1}/{num_iters}  loss={history['loss'][-1]:.4f}  "
-                  f"h={history['h'][-1]:.4f}  sigma={fixed_sigma:.4f}  "
-                  f"gamma={gamma:.6f}")
-            
+            print(f"  iter {k:4d}/{num_iters} | loss={history['loss'][-1]:.5f}  "
+                  f"h={history['h'][-1]:.5f}  dw={denoiser_w:.3f}  "
+                  f"sigma={sigma_k:.4f}  gamma={gamma:.3e}")
 
     return W, history

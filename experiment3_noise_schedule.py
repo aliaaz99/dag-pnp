@@ -47,8 +47,8 @@ def get_denoiser():
 # ===========================================================================
 D_CONV    = 20     # graph size for convergence panels 1 & 2
 D_SIGMA   = [20]  # graph sizes shown in the sigma panel (panel 3)
-N_SAMPLES = 500
-NUM_SEEDS = 1
+N_SAMPLES = 20
+NUM_SEEDS = 10
 SEED_CONV = 42
 SF_M      = K_EDGES
 
@@ -109,8 +109,8 @@ def _run_single_d(d, denoiser, seed, n_samples, normalise=True):
         X_opt, _ = normalise_X(X)
     else:
         X_opt = X
-
-    _, h_res = dag_pnp(X_opt, denoiser, verbose=True, **kw)
+    # kw["denoise_every"] = 5
+    _, h_res = dag_pnp(X_opt, denoiser, verbose=False, **kw)
     _, h_max = dag_pnp_fixed_sigma(X_opt, denoiser, fixed_sigma=SIGMA_MAX, **kw)
     _, h_min = dag_pnp_fixed_sigma(X_opt, denoiser, fixed_sigma=SIGMA_MIN, **kw)
 
@@ -210,7 +210,7 @@ def run_metrics_table(denoiser, save_dir, normalise=True):
             }
             for label, mdict in raw.items()
         }
-        print_results_table(summary, d=d, n=N_SAMPLES, graph_type="ER",
+        print_results_table(summary, d=d, n=N_SAMPLES, graph_type="SF",
                             metrics=METRICS)
         all_raw[d] = raw
 
