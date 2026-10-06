@@ -12,3 +12,4 @@ logs_train/
 logs_sample/
 samples/
 wandb/
+dag_pnp_github_clean/
